@@ -1,18 +1,12 @@
 import { NextResponse } from "next/server";
-import { getPool } from "@/lib/db";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(): Promise<Response> {
   try {
-    const pool = getPool();
-    if (!pool) return NextResponse.json({ ok: true, db: "disabled" });
-    await pool.query("SELECT 1");
-    return NextResponse.json({ ok: true, db: "ok" });
-  } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: e?.message ?? "db-fail" },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: true, route: "health" });
+  } catch (_e: unknown) {
+    return NextResponse.json({ ok: false, error: "SERVER_ERROR" }, { status: 500 });
   }
 }

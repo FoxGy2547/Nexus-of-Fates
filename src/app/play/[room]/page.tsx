@@ -14,9 +14,6 @@ export default function PlayRoomPage() {
   const roomId = useRoomParam();
   const { you, players, state, endTurn, playCard, attackActive, switchActive } = useGame(roomId);
 
-  const meSide: Side | "" = you;
-  const foeSide: Side | "" = you === "p1" ? "p2" : you === "p2" ? "p1" : "";
-
   return (
     <main className="min-h-screen p-4 md:p-6 flex flex-col gap-4">
       <header className="flex items-center justify-between">
@@ -33,7 +30,7 @@ export default function PlayRoomPage() {
 
       <HandPanel
         state={state}
-        you={meSide}
+        you={you}
         onPlay={(i) => playCard(i)}
         onSwitch={(i) => switchActive(i)}
         onAttack={() => attackActive()}
@@ -44,7 +41,6 @@ export default function PlayRoomPage() {
 }
 
 /* ---------- UI subcomponents ---------- */
-
 function PlayersPanel({ players, you }: { players: PlayersMsg; you: Side | "" }) {
   const p1 = players.p1;
   const p2 = players.p2;
@@ -187,7 +183,6 @@ function HandPanel({
         <button className="px-3 py-1.5 rounded bg-rose-700/70 hover:bg-rose-700 text-sm" onClick={onEndTurn}>
           End Turn
         </button>
-        {/* เดโม่ปุ่ม switch ไปที่ index 0/1 */}
         <button className="px-3 py-1.5 rounded bg-teal-700/70 hover:bg-teal-700 text-sm" onClick={() => onSwitch(0)}>
           Switch 0
         </button>

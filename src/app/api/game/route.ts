@@ -12,31 +12,66 @@ type Element =
   | "Geo" | "Anemo" | "Quantum" | "Imaginary" | "Neutral";
 
 interface PlayerInfo { userId: string; name?: string | null; avatar?: string | null; }
-interface RoomState {
-  state: any; seed: string; p1?: PlayerInfo; p2?: PlayerInfo;
-}
+
+type DicePool = Record<Element, number>;
+
 type Unit = { code: string; atk: number; hp: number; element: Element };
+
+type LastAction =
+  | { kind: "draw"; card: string }
+  | { kind: "playCard"; side: Side; code: string }
+  | { kind: "attackUnit"; side: Side; code: string; target: string; dmg: number; coun: number }
+  | { kind: "attackHero"; side: Side; code: string; dmg: number }
+  | { kind: "endTurn" }
+  | Record<string, unknown> // เผื่อ debug payload อื่น ๆ
+
+type LobbyState = {
+  phase: "lobby";
+  ready: { p1: boolean; p2: boolean };
+  rngSeed: string;
+  lastAction: LastAction | null;
+};
+
 type BattleState = {
-  phase: "play"; rngSeed: string; turn: Side; lastAction: any;
+  phase: "play";
+  rngSeed: string;
+  turn: Side;
+  lastAction: LastAction | null;
   hero: { p1: number; p2: number };
-  deck: { p1: string[]; p2: string[] }; hand: { p1: string[]; p2: string[] };
-  board: { p1: Unit[]; p2: Unit[] }; discard:{ p1: string[]; p2: string[] };
-  dice: { p1: Record<Element, number>; p2: Record<Element, number> };
+  deck: { p1: string[]; p2: string[] };
+  hand: { p1: string[]; p2: string[] };
+  board: { p1: Unit[]; p2: Unit[] };
+  discard: { p1: string[]; p2: string[] };
+  dice: { p1: DicePool; p2: DicePool };
   playedCount: { p1: number; p2: number };
   temp: { p1: { plusDmg: number; shieldNext: number }; p2: { plusDmg: number; shieldNext: number } };
 };
-type ActionOk  = { ok: true; patch?: any; winner?: Side };
+
+type RoomState = {
+  state: LobbyState | BattleState;
+  seed: string;
+  p1?: PlayerInfo;
+  p2?: PlayerInfo;
+};
+
+type ActionOk  = { ok: true; patch?: Partial<BattleState>; winner?: Side };
 type ActionErr = { ok: false; error: string };
 type ActionRes = ActionOk | ActionErr;
 
-type Body =
-  | { action: "createRoom"; roomId?: string; user: PlayerInfo }
-  | { action: "joinRoom"; roomId: string; user: PlayerInfo; force?: boolean }
-  | { action: "players"; roomId: string }
-  | { action: "ready"; roomId: string; side?: Side; userId?: string }
-  | { action: "state"; roomId: string }
-  | { action: "action"; roomId: string; side: Side; payload: any }
-  | { action: "leave"; roomId: string; userId: string };
+type CreateRoomBody = { action: "createRoom"; roomId?: string; user: PlayerInfo };
+type JoinRoomBody   = { action: "joinRoom"; roomId: string; user: PlayerInfo };
+type PlayersBody    = { action: "players"; roomId: string };
+type ReadyBody      = { action: "ready"; roomId: string; side?: Side; userId?: string };
+type StateBody      = { action: "state"; roomId: string };
+type LeaveBody      = { action: "leave"; roomId: string; userId: string };
+type ActionPayload  =
+  | { kind: "playCard"; index: number }
+  | { kind: "attack"; index: number }
+  | { kind: "endTurn" }
+  | Record<string, unknown>;
+type ActionBody     = { action: "action"; roomId: string; side: Side; payload: ActionPayload };
+
+type Body = CreateRoomBody | JoinRoomBody | PlayersBody | ReadyBody | StateBody | ActionBody | LeaveBody;
 
 /* ===== Global stores ===== */
 declare global {
@@ -52,7 +87,10 @@ globalThis.__NOF_ROOMS__ = rooms;
 
 let CARD_STATS =
   globalThis.__NOF_CARD_STATS__ ??
-  (globalThis.__NOF_CARD_STATS__ = {} as Record<string, { atk: number; hp: number; element: Element; ability?: string; cost: number }>);
+  (globalThis.__NOF_CARD_STATS__ = {} as Record<
+    string,
+    { atk: number; hp: number; element: Element; ability?: string; cost: number }
+  >);
 
 /* ===== RNG / utils ===== */
 function hashToSeed(s: string) { let h = 2166136261 >>> 0; for (let i=0;i<s.length;i++){ h ^= s.charCodeAt(i); h = Math.imul(h,16777619);} return h>>>0; }
@@ -61,7 +99,7 @@ function shuffle<T>(arr:T[], seed:string){ const rng=mulberry32(hashToSeed(seed)
 
 /* ===== Dice ===== */
 const ELEMENTS: Element[] = ["Pyro","Hydro","Cryo","Electro","Geo","Anemo","Quantum","Imaginary","Neutral"];
-function emptyDice(){ const d:any={}; ELEMENTS.forEach(e=>d[e]=0); return d; }
+function emptyDice(): DicePool { const d = {} as DicePool; ELEMENTS.forEach(e=> (d[e]=0)); return d; }
 function rollDice(seed:string){ const rng=mulberry32(hashToSeed(seed)); const d=emptyDice(); for(let i=0;i<6;i++){ const e=ELEMENTS[Math.floor(rng()*ELEMENTS.length)]; d[e]+=1; } return d; }
 
 /* ===== Cards (DB or fallback) ===== */
@@ -97,9 +135,12 @@ async function ensureCardStatsLoaded() {
 }
 
 /* ===== Lobby / start / turn ===== */
-function newLobbyState(seed:string){ return { phase:"lobby" as const, ready:{p1:false,p2:false}, rngSeed:seed, lastAction:null }; }
-function startPlay(state:any){
-  const seed = state.rngSeed as string;
+function newLobbyState(seed:string): LobbyState {
+  return { phase:"lobby", ready:{p1:false,p2:false}, rngSeed:seed, lastAction:null };
+}
+
+function startPlay(state: LobbyState): BattleState {
+  const seed = state.rngSeed;
   const allCodes = Object.keys(CARD_STATS);
   const d1 = shuffle(allCodes, seed + ":p1");
   const d2 = shuffle(allCodes, seed + ":p2");
@@ -112,7 +153,7 @@ function startPlay(state:any){
     dice:{p1:rollDice(seed+":roll:p1:0"), p2:emptyDice()},
     playedCount:{p1:0,p2:0}, temp:{p1:{plusDmg:0,shieldNext:0}, p2:{plusDmg:0,shieldNext:0}},
   };
-  Object.assign(state, st);
+  return st;
 }
 function drawOne(state:BattleState, side:Side){ const d=state.deck[side]; if(!d.length) return; const c=d.shift()!; state.hand[side].push(c); state.lastAction={kind:"draw", card:c}; }
 function startTurn(state:BattleState, side:Side){ state.temp[side]={plusDmg:0,shieldNext:0}; state.dice[side]=rollDice(state.rngSeed+":roll:"+side+":"+Date.now()); state.playedCount[side]=0; }
@@ -141,7 +182,8 @@ function doPlayCard(s:BattleState, side:Side, handIndex:number):ActionRes{
 function doAttack(s:BattleState, side:Side, boardIndex:number):ActionRes{
   const me=s.board[side]; if (boardIndex<0 || boardIndex>=me.length) return { ok:false, error:"Invalid board index" };
   const unit=me[boardIndex]; const enemy:Side=side==="p1"?"p2":"p1"; const foe=s.board[enemy];
-  let dmg=unit.atk+(s.temp[side].plusDmg||0); const blazeBonus=unit.code==="BLAZE_KNIGHT"?1:0;
+  const dmg = unit.atk + (s.temp[side].plusDmg || 0);
+  const blazeBonus=unit.code==="BLAZE_KNIGHT"?1:0;
   if (foe.length>0){
     const target=foe[0]; target.hp-=dmg; unit.hp-=target.atk;
     s.lastAction={ kind:"attackUnit", side, code:unit.code, target:target.code, dmg, coun:target.atk };
@@ -155,14 +197,15 @@ function doAttack(s:BattleState, side:Side, boardIndex:number):ActionRes{
     return { ok:true, patch:{ hero:s.hero, lastAction:s.lastAction } };
   }
 }
-function applyAction(state:any, side:Side, action:any):ActionRes{
+function applyAction(state: LobbyState | BattleState, side:Side, action: ActionPayload):ActionRes{
   if (state.phase!=="play") return { ok:false, error:"Game not started" };
-  if (state.turn!==side) return { ok:false, error:"Not your turn" };
-  const s=state as BattleState;
-  if (action?.kind==="playCard") return doPlayCard(s, side, action.index ?? -1);
-  if (action?.kind==="attack")   return doAttack(s, side, action.index ?? -1);
-  if (action?.kind==="endTurn")  { endTurnAndPass(s); return { ok:true, patch:{ turn:s.turn, dice:s.dice, lastAction:s.lastAction } }; }
-  return { ok:true, patch:{ lastAction: action } };
+  const s = state as BattleState;
+  if (s.turn!==side) return { ok:false, error:"Not your turn" };
+
+  if (action?.kind==="playCard") return doPlayCard(s, side, typeof action.index==="number" ? action.index : -1);
+  if (action?.kind==="attack")   return doAttack(s, side, typeof action.index==="number" ? action.index : -1);
+  if (action?.kind==="endTurn")  { endTurnAndPass(s); s.lastAction = { kind:"endTurn" }; return { ok:true, patch:{ turn:s.turn, dice:s.dice, lastAction:s.lastAction } }; }
+  return { ok:true, patch:{ lastAction: action as LastAction } };
 }
 
 /* ===== Helpers (Room) ===== */
@@ -174,18 +217,17 @@ function getOrCreateRoom(roomId?: string){
 }
 const dump = (r: RoomState) => ({
   p1: r.p1?.userId ?? null, p2: r.p2?.userId ?? null,
-  ready: r.state?.ready ?? null, phase: r.state?.phase ?? null,
+  ready: (r.state as LobbyState).ready ?? null, phase: r.state?.phase ?? null,
 });
 
 // เคลียร์ state ผิดปกติ + กันคนเดิมนั่งสองฝั่ง
 function sanitize(room: RoomState) {
-  if (!room.state || !("ready" in room.state)) room.state = newLobbyState(room.seed);
+  if (!room.state || (room.state as any).ready === undefined) room.state = newLobbyState(room.seed);
   if (room.p1 && !room.p1.userId) room.p1 = undefined;
   if (room.p2 && !room.p2.userId) room.p2 = undefined;
   if (room.p1 && room.p2 && room.p1.userId === room.p2.userId) {
-    // ถ้าซ้ำกัน ให้เหลือฝั่งเดียว (เก็บ p1)
     room.p2 = undefined;
-    if (room.state?.ready) room.state.ready.p2 = false;
+    if (room.state.phase === "lobby") (room.state as LobbyState).ready.p2 = false;
   }
 }
 
@@ -194,7 +236,6 @@ function attachOrReuse(
   room: RoomState,
   user: PlayerInfo,
   prefer?: Side,
-  force = false
 ): Side | null {
   sanitize(room);
 
@@ -205,9 +246,10 @@ function attachOrReuse(
   // ถ้าเต็มสองฝั่งแล้ว
   if (room.p1 && room.p2) {
     // lobby: เตะคนที่ยังไม่ ready ก่อน
-    if (room.state?.phase === "lobby" && room.state.ready) {
-      if (!room.state.ready.p2) { room.p2 = undefined; return attachOrReuse(room, user, "p2", false); }
-      if (!room.state.ready.p1) { room.p1 = undefined; return attachOrReuse(room, user, "p1", false); }
+    if (room.state.phase === "lobby") {
+      const ready = (room.state as LobbyState).ready;
+      if (!ready.p2) { room.p2 = undefined; return attachOrReuse(room, user, "p2"); }
+      if (!ready.p1) { room.p1 = undefined; return attachOrReuse(room, user, "p1"); }
     }
     return null; // เต็มจริง
   }
@@ -234,25 +276,22 @@ export async function POST(req: Request) {
     await ensureCardStatsLoaded();
 
     let body: Body | null = null;
-    try { body = (await req.json()) as Body; } catch {}
-    if (!body || typeof (body as any).action !== "string") {
+    try { body = (await req.json()) as Body; } catch { /* ignore bad json */ }
+    if (!body || typeof (body as { action?: unknown }).action !== "string") {
       return NextResponse.json({ ok:false, error:"BAD_BODY" }, { status: 400 });
     }
 
     if (body.action === "createRoom") {
       const { id, room } = getOrCreateRoom(body.roomId);
-      const side = attachOrReuse(room, body.user, "p1", true); // บังคับจับ p1
+      const side = attachOrReuse(room, body.user, "p1"); // บังคับจับ p1
       if (!side) return NextResponse.json({ ok:false, error:"ROOM_FULL" }, { status:400 });
       return NextResponse.json({ ok:true, roomId:id, you:side, state:room.state });
     }
 
     if (body.action === "joinRoom") {
       const { id, room } = getOrCreateRoom(body.roomId);
-      // เปิด force อัตโนมัติ, พร้อมล็อกสถานะก่อน/หลังไว้ช่วยดีบั๊ก
-      // eslint-disable-next-line no-console
       console.log("[joinRoom] before", id, dump(room));
-      const side = attachOrReuse(room, body.user, undefined, true);
-      // eslint-disable-next-line no-console
+      const side = attachOrReuse(room, body.user, undefined);
       console.log("[joinRoom] after ", id, "=>", side, dump(room));
       if (!side) return NextResponse.json({ ok:false, error:"ROOM_FULL" }, { status:400 });
       return NextResponse.json({
@@ -264,8 +303,8 @@ export async function POST(req: Request) {
     if (body.action === "leave") {
       const r = rooms.get(body.roomId);
       if (!r) return NextResponse.json({ ok:true });
-      if (r.p1?.userId === body.userId) { r.p1 = undefined; if (r.state?.ready) r.state.ready.p1 = false; }
-      if (r.p2?.userId === body.userId) { r.p2 = undefined; if (r.state?.ready) r.state.ready.p2 = false; }
+      if (r.p1?.userId === body.userId) { r.p1 = undefined; if (r.state.phase==="lobby") (r.state as LobbyState).ready.p1 = false; }
+      if (r.p2?.userId === body.userId) { r.p2 = undefined; if (r.state.phase==="lobby") (r.state as LobbyState).ready.p2 = false; }
       return NextResponse.json({ ok:true });
     }
 
@@ -281,7 +320,7 @@ export async function POST(req: Request) {
       if (!r) return NextResponse.json({ ok:false, error:"ROOM_NOT_FOUND" }, { status:404 });
 
       // ถ้าเกมเริ่มไปแล้ว → idempotent
-      if (!r.state || r.state.phase !== "lobby") {
+      if (r.state.phase !== "lobby") {
         return NextResponse.json({ ok:true, full:true, state:r.state });
       }
 
@@ -289,20 +328,21 @@ export async function POST(req: Request) {
         (r.p1?.userId===body.userId ? "p1" : r.p2?.userId===body.userId ? "p2" : undefined);
       if (!side) return NextResponse.json({ ok:false, error:"SIDE_REQUIRED" }, { status:400 });
 
-      r.state.ready[side] = true;
+      (r.state as LobbyState).ready[side] = true;
 
-      if (r.p1 && r.p2 && r.state.ready.p1 && r.state.ready.p2) {
-        startPlay(r.state);
+      const ready = (r.state as LobbyState).ready;
+      if (r.p1 && r.p2 && ready.p1 && ready.p2) {
+        r.state = startPlay(r.state as LobbyState);
         return NextResponse.json({ ok:true, full:true, state:r.state });
       }
-      return NextResponse.json({ ok:true, full:false, patch:{ ready:r.state.ready } });
+      return NextResponse.json({ ok:true, full:false, patch:{ ready } });
     }
 
     if (body.action === "state") {
       const r = rooms.get(body.roomId);
       if (!r) return NextResponse.json({ ok:false, error:"ROOM_NOT_FOUND" }, { status:404 });
       sanitize(r);
-      return NextResponse.json({ ok:true, state:r.state });
+      return NextResponse.json({ ok:true, state:r.state, players:{ p1:r.p1||null, p2:r.p2||null } });
     }
 
     if (body.action === "action") {
@@ -317,7 +357,8 @@ export async function POST(req: Request) {
     }
 
     return NextResponse.json({ ok:false, error:"UNKNOWN_ACTION" }, { status:400 });
-  } catch (e:any) {
-    return NextResponse.json({ ok:false, error: e?.message ?? "SERVER_ERROR" }, { status:500 });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : "SERVER_ERROR";
+    return NextResponse.json({ ok:false, error: msg }, { status:500 });
   }
 }
