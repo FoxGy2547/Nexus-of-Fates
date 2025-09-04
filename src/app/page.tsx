@@ -3,9 +3,10 @@
 import { useState, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { signIn, signOut, useSession } from "next-auth/react";
+import Image from "next/image";
 
 /** helper เรียก API game */
-async function post<T = any>(body: unknown): Promise<T> {
+async function post<T = unknown>(body: unknown): Promise<T> {
   const res = await fetch("/api/game", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -45,12 +46,15 @@ export default function Home() {
   async function onCreate() {
     try {
       const roomId = (createCode || randRoom()).toUpperCase();
-      const res = await post<{ ok: boolean; roomId: string }>(
-        { action: "createRoom", roomId, user }
-      );
+      const res = await post<{ ok: boolean; roomId: string }>({
+        action: "createRoom",
+        roomId,
+        user,
+      });
       router.push(`/play/${res.roomId}`);
-    } catch (e: any) {
-      alert(`Create failed: ${e?.message || "unknown"}`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      alert(`Create failed: ${msg}`);
     }
   }
 
@@ -58,12 +62,15 @@ export default function Home() {
     try {
       const roomId = (joinCode || "").trim().toUpperCase();
       if (!roomId) return alert("กรอกรหัสห้องก่อนนะ");
-      const res = await post<{ ok: boolean; roomId: string }>(
-        { action: "joinRoom", roomId, user }
-      );
+      const res = await post<{ ok: boolean; roomId: string }>({
+        action: "joinRoom",
+        roomId,
+        user,
+      });
       router.push(`/play/${res.roomId}`);
-    } catch (e: any) {
-      alert(`Join failed: ${e?.message || "unknown"}`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      alert(`Join failed: ${msg}`);
     }
   }
 
@@ -76,7 +83,13 @@ export default function Home() {
         {status === "authenticated" ? (
           <>
             {session.user?.image && (
-              <img src={session.user.image} alt="" className="w-8 h-8 rounded-full" />
+              <Image
+                src={session.user.image}
+                alt={session.user?.name ? `${session.user.name} avatar` : ""}
+                width={32}
+                height={32}
+                className="rounded-full"
+              />
             )}
             <span>{session.user?.name ?? "Discord User"}</span>
             <button className="px-3 py-1 rounded bg-red-600" onClick={() => signOut()}>
@@ -109,9 +122,7 @@ export default function Home() {
               Create
             </button>
           </div>
-          <p className="mt-2 text-xs opacity-70">
-            โฮสต์จะถูกกำหนดเป็นฝั่ง p1 โดยอัตโนมัติ
-          </p>
+          <p className="mt-2 text-xs opacity-70">โฮสต์จะถูกกำหนดเป็นฝั่ง p1 โดยอัตโนมัติ</p>
         </div>
 
         {/* join */}
