@@ -1,5 +1,5 @@
 import NextAuth, { type NextAuthOptions } from "next-auth";
-import Discord from "next-auth/providers/discord";
+import DiscordProvider from "next-auth/providers/discord";
 import { createPool } from "@/lib/db";
 import type { Pool, RowDataPacket } from "mysql2/promise";
 
@@ -13,15 +13,46 @@ function getPool(): Promise<Pool> {
   return poolPromise!;
 }
 
-interface UserIdRow extends RowDataPacket { id: number }
+/** ขยาย type ให้ token มี uid และ session.user.id ใช้งานได้ */
+declare module "next-auth/jwt" {
+  // eslint-disable-next-line @typescript-eslint/consistent-type-definitions
+  export interface JWT {
+    uid?: string;
+    name?: string | null;
+    picture?: string | null;
+  }
+}
+declare module "next-auth" {
+  // eslint-disable-next-line @typescript-eslint/consistent-type-definitions
+  export interface Session {
+    user?: {
+      id?: string;
+      name?: string | null;
+      email?: string | null;
+      image?: string | null;
+    };
+  }
+}
+
+interface UserIdRow extends RowDataPacket {
+  id: number;
+}
+
+/** shape แบบหลวม ๆ เฉพาะ field ที่เราใช้จาก Discord profile */
+type MaybeDiscordProfile = Partial<
+  Record<
+    "email" | "global_name" | "username" | "name" | "image_url" | "avatar",
+    string
+  >
+>;
 
 export const authOptions: NextAuthOptions = {
   session: { strategy: "jwt" },
 
   providers: [
-    Discord({
-      clientId: process.env.DISCORD_CLIENT_ID!,
-      clientSecret: process.env.DISCORD_CLIENT_SECRET!,
+    DiscordProvider({
+      clientId: process.env.DISCORD_CLIENT_ID ?? "",
+      clientSecret: process.env.DISCORD_CLIENT_SECRET ?? "",
       authorization: { params: { scope: "identify email" } },
     }),
   ],
@@ -39,26 +70,27 @@ export const authOptions: NextAuthOptions = {
           ? account.providerAccountId
           : token.sub ?? "";
 
+      // map profile แบบปลอดภัย (ไม่ใช้ any)
+      const p: MaybeDiscordProfile | null = (profile ?? null) as MaybeDiscordProfile | null;
+
       // เก็บค่าที่พอมี
-      const email =
-        (token.email as string | null) ??
-        (user?.email as string | null) ??
-        ((profile as any)?.email ?? null);
+      const email: string | null =
+        token.email ?? user?.email ?? p?.email ?? null;
 
-      const username =
-        (token.name as string | null) ??
-        (user?.name as string | null) ??
-        ((profile as any)?.global_name ??
-          (profile as any)?.username ??
-          (profile as any)?.name ??
-          null);
+      const username: string | null =
+        token.name ??
+        user?.name ??
+        p?.global_name ??
+        p?.username ??
+        p?.name ??
+        null;
 
-      const avatar =
-        (token.picture as string | null) ??
-        (user?.image as string | null) ??
-        ((profile as any)?.image_url ??
-          (profile as any)?.avatar ??
-          null);
+      const avatar: string | null =
+        token.picture ??
+        user?.image ??
+        p?.image_url ??
+        p?.avatar ??
+        null;
 
       let uid: string = discordId; // default fallback = discord id (string)
 
@@ -88,10 +120,9 @@ export const authOptions: NextAuthOptions = {
         console.warn("[nextauth] DB skipped:", e);
       }
 
-      (token as any).uid = uid;
-      // เผื่อให้ค่า name/picture ติดอยู่ใน token เสมอ
-      if (username) token.name = username;
-      if (avatar) token.picture = avatar;
+      token.uid = uid;
+      if (username !== null && username !== undefined) token.name = username;
+      if (avatar !== null && avatar !== undefined) token.picture = avatar;
 
       return token;
     },
@@ -100,14 +131,19 @@ export const authOptions: NextAuthOptions = {
      * ใส่ user.id ลง session ให้ฝั่ง client ใช้งานสะดวก
      */
     async session({ session, token }) {
-      // ปกติ next-auth รับประกันว่ามี session.user อยู่แล้ว
       if (session.user) {
-        (session.user as any).id = (token as any).uid as string;
+        session.user.id = token.uid ?? token.sub ?? session.user.email ?? undefined;
         // sync ชื่อ/รูปจาก token เผื่อกรณี Discord เปลี่ยน
-        if (token.name) session.user.name = token.name as string;
-        if (token.picture) session.user.image = token.picture as string;
+        if (token.name !== undefined) session.user.name = token.name;
+        if (token.picture !== undefined) session.user.image = token.picture;
       }
       return session;
+    },
+
+    async redirect({ url, baseUrl }) {
+      if (url.startsWith(baseUrl)) return url;
+      if (url.startsWith("/")) return `${baseUrl}${url}`;
+      return baseUrl;
     },
   },
 };
