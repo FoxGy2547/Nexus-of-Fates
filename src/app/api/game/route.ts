@@ -438,14 +438,15 @@ export async function POST(req: Request) {
     }
 
     if (body.action === "state") {
-      const r = rooms.get(body.roomId);
-      if (!r) return NextResponse.json({ ok: false, error: "ROOM_NOT_FOUND" }, { status: 404 });
-      sanitize(r);
-      return NextResponse.json({
+    // เดิม: ถ้าไม่เจอ r -> 404
+    // ใหม่: สร้างให้เลย จะได้ไม่เด้ง 404 ตอนสลับ lambda
+    const { room } = getOrCreateRoom(body.roomId);
+    sanitize(room);
+    return NextResponse.json({
         ok: true,
-        state: r.state,
-        players: { p1: r.p1 ?? null, p2: r.p2 ?? null },
-      });
+        state: room.state,
+        players: { p1: room.p1 ?? null, p2: room.p2 ?? null },
+    });
     }
 
     if (body.action === "action") {
