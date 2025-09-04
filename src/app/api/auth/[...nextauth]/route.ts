@@ -15,16 +15,14 @@ function getPool(): Promise<Pool> {
 
 /** ขยาย type ให้ token มี uid และ session.user.id ใช้งานได้ */
 declare module "next-auth/jwt" {
-  // eslint-disable-next-line @typescript-eslint/consistent-type-definitions
-  export interface JWT {
+  interface JWT {
     uid?: string;
     name?: string | null;
     picture?: string | null;
   }
 }
 declare module "next-auth" {
-  // eslint-disable-next-line @typescript-eslint/consistent-type-definitions
-  export interface Session {
+  interface Session {
     user?: {
       id?: string;
       name?: string | null;
@@ -37,18 +35,13 @@ declare module "next-auth" {
 interface UserIdRow extends RowDataPacket {
   id: number;
 }
-
-/** shape แบบหลวม ๆ เฉพาะ field ที่เราใช้จาก Discord profile */
 type MaybeDiscordProfile = Partial<
-  Record<
-    "email" | "global_name" | "username" | "name" | "image_url" | "avatar",
-    string
-  >
+  Record<"email" | "global_name" | "username" | "name" | "image_url" | "avatar", string>
 >;
 
-export const authOptions: NextAuthOptions = {
+/** 🚫 อย่า export ตัวนี้ออกไปนะ ไม่งั้น Next.js จะ error */
+const authOptions: NextAuthOptions = {
   session: { strategy: "jwt" },
-
   providers: [
     DiscordProvider({
       clientId: process.env.DISCORD_CLIENT_ID ?? "",
@@ -56,49 +49,22 @@ export const authOptions: NextAuthOptions = {
       authorization: { params: { scope: "identify email" } },
     }),
   ],
-
   callbacks: {
-    /**
-     * ทุกครั้งที่ออก JWT
-     * - พยายาม upsert ผู้ใช้ลง DB (ถ้า DB ล่ม/ไม่พร้อม จะข้ามอย่างสุภาพ)
-     * - เซ็ต token.uid ให้ใช้ใน session callback
-     */
     async jwt({ token, account, user, profile }) {
-      // id ฝั่ง Discord ที่เสถียร
       const discordId =
-        account?.provider === "discord"
-          ? account.providerAccountId
-          : token.sub ?? "";
+        account?.provider === "discord" ? account.providerAccountId : token.sub ?? "";
 
-      // map profile แบบปลอดภัย (ไม่ใช้ any)
       const p: MaybeDiscordProfile | null = (profile ?? null) as MaybeDiscordProfile | null;
 
-      // เก็บค่าที่พอมี
-      const email: string | null =
-        token.email ?? user?.email ?? p?.email ?? null;
-
+      const email: string | null = token.email ?? user?.email ?? p?.email ?? null;
       const username: string | null =
-        token.name ??
-        user?.name ??
-        p?.global_name ??
-        p?.username ??
-        p?.name ??
-        null;
+        token.name ?? user?.name ?? p?.global_name ?? p?.username ?? p?.name ?? null;
+      const avatar: string | null = token.picture ?? user?.image ?? p?.image_url ?? p?.avatar ?? null;
 
-      const avatar: string | null =
-        token.picture ??
-        user?.image ??
-        p?.image_url ??
-        p?.avatar ??
-        null;
+      let uid = discordId;
 
-      let uid: string = discordId; // default fallback = discord id (string)
-
-      // พยายามแตะ DB อย่างสุภาพ
       try {
         const pool = await getPool();
-
-        // upsert ผู้ใช้
         await pool.query(
           `INSERT INTO users (discord_id, email, username, avatar)
            VALUES (?, ?, ?, ?)
@@ -108,15 +74,12 @@ export const authOptions: NextAuthOptions = {
              avatar = VALUES(avatar)`,
           [discordId, email, username, avatar]
         );
-
-        // ดึง user.id (เลข autoincrement) มาใช้เป็น uid
-        const [rows] = await pool.query<UserIdRow[]>(
+        const [rows] = await pool.execute<UserIdRow[]>(
           "SELECT id FROM users WHERE discord_id = ? LIMIT 1",
           [discordId]
         );
         if (rows.length) uid = String(rows[0].id);
       } catch (e) {
-        // ไม่ทำให้ล้ม — แค่ log แล้วใช้ fallback ต่อไป
         console.warn("[nextauth] DB skipped:", e);
       }
 
@@ -126,20 +89,14 @@ export const authOptions: NextAuthOptions = {
 
       return token;
     },
-
-    /**
-     * ใส่ user.id ลง session ให้ฝั่ง client ใช้งานสะดวก
-     */
     async session({ session, token }) {
       if (session.user) {
         session.user.id = token.uid ?? token.sub ?? session.user.email ?? undefined;
-        // sync ชื่อ/รูปจาก token เผื่อกรณี Discord เปลี่ยน
         if (token.name !== undefined) session.user.name = token.name;
         if (token.picture !== undefined) session.user.image = token.picture;
       }
       return session;
     },
-
     async redirect({ url, baseUrl }) {
       if (url.startsWith(baseUrl)) return url;
       if (url.startsWith("/")) return `${baseUrl}${url}`;
