@@ -17,7 +17,7 @@ async function post<T = unknown>(body: unknown): Promise<T> {
     const txt = await res.text().catch(() => "");
     throw new Error(txt || res.statusText);
   }
-  return res.json() as Promise<T>;
+  return (await res.json()) as T;
 }
 
 function randRoom(len = 6) {
@@ -34,8 +34,9 @@ export default function Home() {
   const [createCode, setCreateCode] = useState<string>(randRoom());
   const [joinCode, setJoinCode] = useState<string>("");
 
+  // ✅ ไม่ใช้ any แล้ว เพราะเรา extend type ของ Session ไว้ใน next-auth.d.ts
   const user = useMemo(() => {
-    const id = ((session?.user as any)?.id ?? session?.user?.email ?? "guest") as string;
+    const id = session?.user?.id ?? session?.user?.email ?? "guest";
     return {
       userId: id,
       name: session?.user?.name ?? "Player",
@@ -52,7 +53,7 @@ export default function Home() {
         user,
       });
       router.push(`/play/${res.roomId}`);
-    } catch (e: unknown) {
+    } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       alert(`Create failed: ${msg}`);
     }
@@ -68,7 +69,7 @@ export default function Home() {
         user,
       });
       router.push(`/play/${res.roomId}`);
-    } catch (e: unknown) {
+    } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       alert(`Join failed: ${msg}`);
     }

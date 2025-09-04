@@ -1,318 +1,200 @@
-// web/src/app/play/[room]/page.tsx
 "use client";
 
-import { use, useEffect, useMemo, useRef, useState } from "react";
-import { useSession } from "next-auth/react";
+import { useMemo } from "react";
+import { useParams } from "next/navigation";
+import Image from "next/image";
+import { useGame, CARD_IMG, Side, PlayersMsg, BattleState } from "@/hooks/useGame";
 
-/* ========= types ========= */
-type Side = "p1" | "p2";
-type Element =
-    | "Pyro" | "Hydro" | "Cryo" | "Electro"
-    | "Geo" | "Anemo" | "Quantum" | "Imaginary" | "Neutral";
-
-type DicePool = Record<Element, number>;
-
-type PlayerInfo = {
-    userId: string;
-    name?: string | null;
-    avatar?: string | null;
-};
-
-type Players = { p1: PlayerInfo | null; p2: PlayerInfo | null };
-
-type Unit = { code: string; atk: number; hp: number; element: Element };
-
-type BattleState = {
-    phase?: "lobby" | "play";
-    rngSeed?: string;
-    turn?: Side;
-    lastAction?: any;
-    // minimal fieldsพอให้ UI ไม่พัง
-    hero?: { p1: number; p2: number };
-    board?: { p1: Unit[]; p2: Unit[] };
-    hand?: { p1: string[]; p2: string[] };
-    dice?: { p1: DicePool; p2: DicePool };
-};
-
-type JoinRes =
-    | { ok: true; you: Side; roomId: string; players: Players; state: BattleState }
-    | { ok: false; error: string };
-
-type PlayersRes = { ok: true; players: Players };
-
-type StateRes =
-    | { ok: true; full: boolean; state: BattleState }
-    | { ok: true; full: false; patch: Partial<BattleState> };
-
-type ActionRes =
-    | { ok: true; patch?: Partial<BattleState>; winner?: Side | null }
-    | { ok: false; error: string };
-
-/* ========= helpers ========= */
-const EMPTY_DICE: DicePool = {
-    Pyro: 0, Hydro: 0, Cryo: 0, Electro: 0, Geo: 0, Anemo: 0, Quantum: 0, Imaginary: 0, Neutral: 0,
-};
-
-function mergeState(prev: BattleState | null, incoming: Partial<BattleState>): BattleState {
-    const base: BattleState = prev ?? {
-        phase: "lobby",
-        turn: "p1",
-        hero: { p1: 30, p2: 30 },
-        board: { p1: [], p2: [] },
-        hand: { p1: [], p2: [] },
-        dice: { p1: { ...EMPTY_DICE }, p2: { ...EMPTY_DICE } },
-    };
-    return {
-        ...base,
-        ...incoming,
-        hero: { ...(base.hero ?? { p1: 30, p2: 30 }), ...(incoming.hero ?? {}) },
-        board: {
-            p1: incoming.board?.p1 ?? base.board!.p1,
-            p2: incoming.board?.p2 ?? base.board!.p2,
-        },
-        hand: {
-            p1: incoming.hand?.p1 ?? base.hand!.p1,
-            p2: incoming.hand?.p2 ?? base.hand!.p2,
-        },
-        dice: {
-            p1: { ...(base.dice?.p1 ?? EMPTY_DICE), ...(incoming.dice?.p1 ?? {}) },
-            p2: { ...(base.dice?.p2 ?? EMPTY_DICE), ...(incoming.dice?.p2 ?? {}) },
-        },
-    };
+function useRoomParam(): string {
+  const p = useParams<{ room: string }>();
+  return useMemo(() => (Array.isArray(p.room) ? p.room[0] : p.room) ?? "", [p.room]);
 }
 
-async function post<T>(body: any): Promise<T> {
-    const res = await fetch("/api/game", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-    });
-    // ถ้าเซิร์ฟเวอร์ล้ม res.ok = false → จะโยนข้อความให้อ่านง่าย
-    if (!res.ok) {
-        const txt = await res.text().catch(() => "");
-        throw new Error(`HTTP ${res.status} /api/game → ${txt || "Failed"}`);
-    }
-    return res.json();
+export default function PlayRoomPage() {
+  const roomId = useRoomParam();
+  const { you, players, state, endTurn, playCard, attackActive, switchActive } = useGame(roomId);
+
+  const meSide: Side | "" = you;
+  const foeSide: Side | "" = you === "p1" ? "p2" : you === "p2" ? "p1" : "";
+
+  return (
+    <main className="min-h-screen p-4 md:p-6 flex flex-col gap-4">
+      <header className="flex items-center justify-between">
+        <h1 className="text-xl font-semibold">Room: {roomId}</h1>
+        <div className="text-sm opacity-70">You are: {you || "-"}</div>
+      </header>
+
+      <PlayersPanel players={players} you={you} />
+
+      <section className="grid md:grid-cols-2 gap-6">
+        <Board title="Opponent Board" side="p2" state={state} />
+        <Board title="Your Board" side="p1" state={state} />
+      </section>
+
+      <HandPanel
+        state={state}
+        you={meSide}
+        onPlay={(i) => playCard(i)}
+        onSwitch={(i) => switchActive(i)}
+        onAttack={() => attackActive()}
+        onEndTurn={() => endTurn()}
+      />
+    </main>
+  );
 }
 
-/* ========= page ========= */
-export default function PlayRoomPage({ params }: { params: Promise<{ room: string }> }) {
-    const { room } = use(params);
-    const { data: session, status } = useSession();
+/* ---------- UI subcomponents ---------- */
 
-    // ฝั่งเราอยู่ซ้าย, ศัตรูขวา
-    const [you, setYou] = useState<Side>("p1");
-    const [players, setPlayers] = useState<Players>({ p1: null, p2: null });
-    const [state, setState] = useState<BattleState | null>(null);
+function PlayersPanel({ players, you }: { players: PlayersMsg; you: Side | "" }) {
+  const p1 = players.p1;
+  const p2 = players.p2;
+  return (
+    <section className="grid grid-cols-2 gap-4">
+      <PlayerCard label="P1" player={p1} highlight={you === "p1"} />
+      <PlayerCard label="P2" player={p2} highlight={you === "p2"} />
+    </section>
+  );
+}
 
-    const joined = useRef(false);
+function PlayerCard({
+  label,
+  player,
+  highlight,
+}: {
+  label: string;
+  player: PlayersMsg["p1"];
+  highlight?: boolean;
+}) {
+  return (
+    <div
+      className={`flex items-center gap-3 rounded-xl border border-white/10 p-3 bg-black/20 ${
+        highlight ? "ring-2 ring-emerald-500" : ""
+      }`}
+    >
+      {player?.avatar ? (
+        <Image
+          src={player.avatar}
+          alt={player?.name ? `${player.name} avatar` : ""}
+          width={36}
+          height={36}
+          className="rounded-full"
+        />
+      ) : (
+        <div className="w-9 h-9 rounded-full bg-white/10" aria-hidden />
+      )}
+      <div className="flex flex-col">
+        <div className="text-xs opacity-60">{label}</div>
+        <div className="text-sm">{player?.name ?? "—"}</div>
+      </div>
+    </div>
+  );
+}
 
-    const meInfo = useMemo(
-        () => ({
-            userId: (session?.user as any)?.id ?? (session?.user?.email ?? "guest"),
-            name: session?.user?.name ?? "Discord User",
-            avatar: session?.user?.image ?? undefined,
-        }),
-        [session]
-    );
+function Board({
+  title,
+  side,
+  state,
+}: {
+  title: string;
+  side: Side;
+  state: BattleState | null;
+}) {
+  const units = state?.chars?.[side] ?? [];
+  return (
+    <div className="rounded-xl border border-white/10 p-3 bg-black/10">
+      <div className="font-medium mb-2">{title}</div>
+      <div className="grid grid-cols-3 gap-3">
+        {units.map((u) => (
+          <CardSlot key={u.code} code={u.code} hp={u.hp} atk={u.attack} />
+        ))}
+        {units.length === 0 && (
+          <div className="col-span-3 text-center text-sm opacity-60">No units</div>
+        )}
+      </div>
+    </div>
+  );
+}
 
-    /* ---------- join room (once per user/room) ---------- */
-    useEffect(() => {
-        if (status !== "authenticated") return;
-        if (!meInfo.userId) return;
-        if (joined.current) return;
+function CardSlot({ code, hp, atk }: { code: string; hp: number; atk: number }) {
+  const img = CARD_IMG[code];
+  return (
+    <div className="relative rounded-lg overflow-hidden bg-white/5 aspect-[4/5]">
+      {img ? (
+        <Image
+          src={`/cards/${img}`}
+          alt={code}
+          fill
+          sizes="(max-width: 768px) 50vw, 25vw"
+          className="object-cover"
+        />
+      ) : (
+        <div className="w-full h-full grid place-items-center text-xs opacity-60">{code}</div>
+      )}
+      <div className="absolute bottom-1 left-1 text-xs bg-black/70 px-1.5 py-0.5 rounded">
+        ATK {atk}
+      </div>
+      <div className="absolute bottom-1 right-1 text-xs bg-black/70 px-1.5 py-0.5 rounded">
+        HP {hp}
+      </div>
+    </div>
+  );
+}
 
-        let stop = false;
-        (async () => {
-            try {
-                const r = await post<JoinRes>({
-                    action: "joinRoom",
-                    roomId: room,
-                    user: meInfo,
-                });
-                if (!r.ok) throw new Error((r as any).error);
-                if (stop) return;
+function HandPanel({
+  state,
+  you,
+  onPlay,
+  onSwitch,
+  onAttack,
+  onEndTurn,
+}: {
+  state: BattleState | null;
+  you: Side | "";
+  onPlay: (index: number) => void;
+  onSwitch: (index: number) => void;
+  onAttack: () => void;
+  onEndTurn: () => void;
+}) {
+  const myHand = you ? state?.hand?.[you] ?? [] : [];
+  const myTurn = you ? state?.turn === you : false;
 
-                setYou(r.you);
-                setPlayers(r.players);
-                setState(r.state);
-                joined.current = true;
-            } catch (e: any) {
-                alert(`Join failed: ${e?.message || e}`);
-            }
-        })();
+  return (
+    <section className="rounded-xl border border-white/10 p-3 bg-black/20">
+      <div className="mb-2 flex items-center justify-between">
+        <div className="font-medium">Your Hand</div>
+        <div className={`text-sm ${myTurn ? "text-emerald-400" : "opacity-60"}`}>
+          {myTurn ? "Your turn" : "Waiting..."}
+        </div>
+      </div>
 
-        return () => {
-            stop = true;
-        };
-    }, [room, status, meInfo.userId]); // ชัด ๆ ไม่ใส่ joinedRef.current ใน deps
+      <div className="flex flex-wrap gap-2">
+        {myHand.map((code, idx) => (
+          <button
+            key={`${code}-${idx}`}
+            className="px-2 py-1 rounded bg-sky-700/70 hover:bg-sky-700 text-xs"
+            onClick={() => onPlay(idx)}
+          >
+            Play {code}
+          </button>
+        ))}
+        {myHand.length === 0 && <div className="text-sm opacity-60">Empty hand</div>}
+      </div>
 
-    /* ---------- poll players ---------- */
-    useEffect(() => {
-        if (!joined.current) return;
-        let alive = true;
-
-        const iv = setInterval(async () => {
-            try {
-                const r = await post<PlayersRes>({ action: "players", roomId: room });
-                if (!alive) return;
-                if (r?.ok && r.players) setPlayers(r.players);
-            } catch {
-                // มักเกิดตอน dev serverล้ม → ปล่อยเงียบไว้
-            }
-        }, 1000);
-
-        return () => {
-            alive = false;
-            clearInterval(iv);
-        };
-    }, [room, joined.current]);
-
-    /* ---------- poll state/patch ---------- */
-    useEffect(() => {
-        if (!joined.current) return;
-        let alive = true;
-
-        const iv = setInterval(async () => {
-            try {
-                const r = await post<StateRes>({ action: "state", roomId: room });
-                if (!alive) return;
-                if (r.ok) {
-                    if ("full" in r && r.full) {
-                        setState(r.state);
-                    } else if ("patch" in r) {
-                        setState((prev) => mergeState(prev, r.patch || {}));
-                    }
-                }
-            } catch {
-                // ปล่อยว่าง
-            }
-        }, 900);
-
-        return () => {
-            alive = false;
-            clearInterval(iv);
-        };
-    }, [room, joined.current]);
-
-    /* ---------- actions ---------- */
-    async function gameAction(payload: any) {
-        const r = await post<ActionRes>({
-            action: "action",
-            roomId: room,
-            side: you,
-            payload,
-        });
-
-        if (!r.ok) throw new Error(r.error);
-
-        // ✅ จับไว้ในตัวแปร เพื่อให้ TS แคบ type ได้ใน closure
-        const patch = r.patch;
-        if (patch) {
-            setState((prev) => mergeState(prev, patch));
-        }
-
-        if (r.winner) alert(`Winner: ${r.winner}`);
-    }
-
-    const endTurn = () => gameAction({ kind: "endTurn" }).catch((e) => alert(e.message));
-    // ให้ “โจมตี” ใช้ kind ที่ API รองรับ = "attack"
-    const attack = () => gameAction({ kind: "attack", index: 0 }).catch((e) => alert(e.message));
-
-    /* ---------- render ---------- */
-    const foe: Side = you === "p1" ? "p2" : "p1";
-
-    const meName = players[you]?.name ?? "You";
-    const meAvatar = players[you]?.avatar;
-    const foeName = players[foe]?.name ?? "Waiting…";
-    const foeAvatar = players[foe]?.avatar;
-
-    return (
-        <main className="p-6 text-sm">
-            {/* Header: เราซ้าย ศัตรูขวา */}
-            <header className="grid grid-cols-[1fr_auto_1fr] items-center mb-3 gap-4">
-                <div className="flex items-center gap-3">
-                    {meAvatar ? (
-                        <img src={meAvatar} className="w-8 h-8 rounded-full" />
-                    ) : (
-                        <div className="w-8 h-8 rounded-full bg-white/10 grid place-items-center">N</div>
-                    )}
-                    <span className="font-semibold truncate">{meName}</span>
-                </div>
-
-                <div className="text-center">
-                    <span className="font-semibold">Room {room}</span>
-                    <span className="mx-2">•</span>
-                    <span>
-                        Turn:{" "}
-                        <span className="text-purple-300">{state?.turn ?? "-"}</span>
-                    </span>
-                </div>
-
-                <div className="flex items-center gap-3 justify-end">
-                    <span className="font-semibold truncate">{foeName}</span>
-                    {foeAvatar ? (
-                        <img src={foeAvatar} className="w-8 h-8 rounded-full" />
-                    ) : (
-                        <div className="w-8 h-8 rounded-full bg-white/10 grid place-items-center">N</div>
-                    )}
-                </div>
-            </header>
-
-            <div className="mb-3 opacity-70">
-                Last Action: {state?.lastAction ? JSON.stringify(state.lastAction) : "-"}
-            </div>
-
-            {/* บอร์ดเรียง: เราซ้าย ศัตรูขวา */}
-            <section className="grid grid-cols-2 gap-8">
-                {/* my side */}
-                <div>
-                    <div className="w-40 h-52 rounded-xl border border-white/10 bg-black/20 grid place-items-center">
-                        -
-                    </div>
-                    {/* dice */}
-                    <div className="mt-3 grid grid-cols-2 gap-1 text-xs">
-                        {Object.entries(state?.dice?.[you] ?? EMPTY_DICE).map(([k, v]) => (
-                            <div key={`m-${k}`}>{k}:{String(v)}</div>
-                        ))}
-                    </div>
-                </div>
-
-                {/* foe side */}
-                <div className="justify-self-end">
-                    <div className="w-40 h-52 rounded-xl border border-white/10 bg-black/20 grid place-items-center">
-                        -
-                    </div>
-                    {/* dice */}
-                    <div className="mt-3 grid grid-cols-2 gap-1 text-xs">
-                        {Object.entries(state?.dice?.[foe] ?? EMPTY_DICE).map(([k, v]) => (
-                            <div key={`f-${k}`}>{k}:{String(v)}</div>
-                        ))}
-                    </div>
-                </div>
-            </section>
-
-            {/* controls */}
-            <div className="mt-6 flex gap-2">
-                <button
-                    className="px-3 py-2 rounded bg-fuchsia-600/70 hover:bg-fuchsia-600"
-                    onClick={attack}
-                >
-                    โจมตี Active ของศัตรู
-                </button>
-                <button
-                    className="px-3 py-2 rounded bg-blue-600/70 hover:bg-blue-600"
-                    onClick={endTurn}
-                >
-                    End Turn
-                </button>
-            </div>
-
-            {/* hand (placeholder) */}
-            <section className="mt-6">
-                <div className="mb-2 font-semibold">Your Hand</div>
-                <div className="text-white/60">ไม่มีการ์ดในมือ</div>
-            </section>
-        </main>
-    );
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button className="px-3 py-1.5 rounded bg-amber-700/70 hover:bg-amber-700 text-sm" onClick={onAttack}>
+          Attack
+        </button>
+        <button className="px-3 py-1.5 rounded bg-rose-700/70 hover:bg-rose-700 text-sm" onClick={onEndTurn}>
+          End Turn
+        </button>
+        {/* เดโม่ปุ่ม switch ไปที่ index 0/1 */}
+        <button className="px-3 py-1.5 rounded bg-teal-700/70 hover:bg-teal-700 text-sm" onClick={() => onSwitch(0)}>
+          Switch 0
+        </button>
+        <button className="px-3 py-1.5 rounded bg-teal-700/70 hover:bg-teal-700 text-sm" onClick={() => onSwitch(1)}>
+          Switch 1
+        </button>
+      </div>
+    </section>
+  );
 }
