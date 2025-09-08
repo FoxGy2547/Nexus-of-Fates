@@ -9,6 +9,7 @@ import { useGame } from "@/hooks/useGame";
 type Side = "p1" | "p2";
 type DicePool = Record<string, number>;
 type UnitVM = { code: string; attack: number; hp: number; element: string };
+
 type ClientState = {
   mode?: "lobby" | "play";
   turn: Side;
@@ -17,12 +18,13 @@ type ClientState = {
   dice: Record<Side, DicePool>;
   board: Record<Side, UnitVM[]>;
   hand: Record<Side, string[]>;
+  // ready ฝั่งเซิร์ฟเวอร์ยังเป็น p1/p2 อยู่
   ready?: { p1: boolean; p2: boolean };
 };
-type PlayersVM = {
-  p1: { userId: string; name?: string | null; avatar?: string | null } | null;
-  p2: { userId: string; name?: string | null; avatar?: string | null } | null;
-};
+
+type PlayerInfo = { userId: string; name?: string | null; avatar?: string | null };
+type PlayersHostPlayer = { host: PlayerInfo | null; player: PlayerInfo | null };
+type PlayersAsSeats = { p1: PlayerInfo | null; p2: PlayerInfo | null };
 
 /* ===================== meta จาก /api/cards ===================== */
 type Element =
@@ -403,11 +405,19 @@ export default function PlayRoomPage() {
   const params = useParams<{ room: string }>();
   const roomId = useMemo(() => String(params.room || "").toUpperCase(), [params.room]);
 
-  const { you, players, state, ready, endTurn, endPhase, playCard, attackActive } = useGame(roomId);
+  // NOTE: useGame ต้องคืน role + players(host/player)
+  const { role, players, state, ready, endTurn, endPhase, playCard, attackActive } = useGame(roomId);
 
   const cs = (state as ClientState | null) ?? null;
-  const ppl = (players as PlayersVM) ?? { p1: null, p2: null };
-  const yourSide: Side = (you || "p1") as Side;
+
+  // map host → p1, player → p2 เพื่อใช้กับสนามที่เป็น p1/p2
+  const pplSeats: PlayersAsSeats = useMemo(() => {
+    const p = (players as PlayersHostPlayer) ?? { host: null, player: null };
+    return { p1: p.host ?? null, p2: p.player ?? null };
+  }, [players]);
+
+  // ฝั่งเรา/คู่ต่อสู้ (ยึด host=p1, player=p2)
+  const yourSide: Side = role === "host" ? "p1" : role === "player" ? "p2" : "p1";
   const opponentSide: Side = yourSide === "p1" ? "p2" : "p1";
   const yourHero = cs?.hero?.[yourSide] ?? 30;
 
@@ -425,14 +435,20 @@ export default function PlayRoomPage() {
     <main className="min-h-screen p-6 flex flex-col gap-6">
       <header className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">Room: {roomId}</h1>
-        <div className="text-sm opacity-70">You are: {you || "-"}</div>
+        <div className="text-sm opacity-70">You are: {role ?? "-"}</div>
       </header>
 
       {/* ===== LOBBY ===== */}
       {cs?.mode === "lobby" && (
         <section className="rounded-2xl border border-white/10 p-6 bg-black/20">
           <div className="flex items-center gap-4">
-            <button className="px-5 py-2 rounded bg-emerald-600" onClick={ready}>
+            <button
+              className="px-5 py-2 rounded bg-emerald-600"
+              onClick={ready}
+              // ทั้ง host/player กดได้เท่ากัน
+              disabled={!role}
+              title={role ? "Ready" : "Waiting for identify"}
+            >
               Ready
             </button>
             <div className="text-sm">
@@ -452,8 +468,8 @@ export default function PlayRoomPage() {
           <section className="rounded-3xl border border-white/10 p-5 bg-black/20">
             <FieldHeader
               tag={opponentSide.toUpperCase() as "P1" | "P2"}
-              name={ppl[opponentSide]?.name}
-              avatar={ppl[opponentSide]?.avatar}
+              name={pplSeats[opponentSide]?.name}
+              avatar={pplSeats[opponentSide]?.avatar}
             />
             <div className="mt-4 rounded-lg bg-black/30 p-3">
               <div className="opacity-70 mb-1 text-sm">Opponent Board</div>
@@ -488,8 +504,8 @@ export default function PlayRoomPage() {
           <section className="rounded-3xl border border-white/10 p-5 bg-black/20">
             <FieldHeader
               tag={yourSide.toUpperCase() as "P1" | "P2"}
-              name={ppl[yourSide]?.name}
-              avatar={ppl[yourSide]?.avatar}
+              name={pplSeats[yourSide]?.name}
+              avatar={pplSeats[yourSide]?.avatar}
               right={<span className="text-xs opacity-70">Your Hero: {yourHero} HP</span>}
             />
 
