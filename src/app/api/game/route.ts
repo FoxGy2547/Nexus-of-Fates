@@ -48,9 +48,11 @@ type RoomState = LobbyState | BattleState;
 type Room = {
   id: string;
   seed: string;
-  p1?: PlayerInfo;
-  p2?: PlayerInfo;
+  p1?: PlayerInfo | null;
+  p2?: PlayerInfo | null;
   state: RoomState;
+  // ใครเคยนั่งเก้าอี้ไหน (ช่วยให้ reconnect กลับ seat เดิมได้ แม้ p1/p2 ถูกล้างตอนหลุด)
+  lastSeatByUser?: Record<string, Side>;
   __ts?: number; // last-touched timestamp (เพิ่มเพื่อ GC)
 };
 
@@ -74,29 +76,37 @@ type Body =
     };
 
 /* ===================== In-memory store ===================== */
-declare global { var __NOF_ROOMS__: Map<string, Room> | undefined; }
-declare global { var __NOF_CARD_STATS__: Record<string, { atk:number; hp:number; element:Element; ability?:string; cost:number }> | undefined; }
+declare global {
+  var __NOF_ROOMS__: Map<string, Room> | undefined;
+  var __NOF_CARD_STATS__: Record<
+    string,
+    { atk: number; hp: number; element: Element; ability?: string; cost: number }
+  > | undefined;
+}
 
 const rooms = globalThis.__NOF_ROOMS__ ?? new Map<string, Room>();
 globalThis.__NOF_ROOMS__ = rooms;
 
 let CARD_STATS =
-  globalThis.__NOF_CARD_STATS__ ?? (globalThis.__NOF_CARD_STATS__ = {} as Record<
+  globalThis.__NOF_CARD_STATS__ ??
+  (globalThis.__NOF_CARD_STATS__ = {} as Record<
     string,
     { atk: number; hp: number; element: Element; ability?: string; cost: number }
   >);
 
 /* ===== touch + simple GC ===== */
-function touch(room: Room) { room.__ts = Date.now(); }
+function touch(room: Room) {
+  room.__ts = Date.now();
+}
 setInterval(() => {
   const now = Date.now();
   for (const [id, r] of rooms) {
     const ts = r.__ts ?? 0;
-    if (now - ts > 30 * 60 * 1000) { // 30 นาที
+    if (now - ts > 30 * 60 * 1000) {
       rooms.delete(id);
     }
   }
-}, 10 * 60 * 1000); // สแกนทุก 10 นาที
+}, 10 * 60 * 1000);
 
 /* ===================== RNG & utils ===================== */
 function hashToSeed(s: string) {
@@ -109,7 +119,7 @@ function hashToSeed(s: string) {
 }
 function mulberry32(a: number) {
   return function () {
-    let t = (a += 0x6D2B79F5);
+    let t = (a += 0x6d2b79f5);
     t = Math.imul(t ^ (t >>> 15), t | 1);
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
@@ -125,8 +135,22 @@ function shuffle<T>(arr: T[], seed: string) {
   return a;
 }
 
-const ELEMENTS: Element[] = ["Pyro","Hydro","Cryo","Electro","Geo","Anemo","Quantum","Imaginary","Neutral"];
-function emptyDice(): DicePool { const d = {} as DicePool; for (const e of ELEMENTS) d[e] = 0; return d; }
+const ELEMENTS: Element[] = [
+  "Pyro",
+  "Hydro",
+  "Cryo",
+  "Electro",
+  "Geo",
+  "Anemo",
+  "Quantum",
+  "Imaginary",
+  "Neutral",
+];
+function emptyDice(): DicePool {
+  const d = {} as DicePool;
+  for (const e of ELEMENTS) d[e] = 0;
+  return d;
+}
 function rollDice(seed: string, n = 10): DicePool {
   const rng = mulberry32(hashToSeed(seed));
   const d = emptyDice();
@@ -139,7 +163,12 @@ function rollDice(seed: string, n = 10): DicePool {
 
 /* ===================== Cards fallback ===================== */
 if (!Object.keys(CARD_STATS).length) {
-  const f = (e: Element, atk: number, hp: number, cost: number) => ({ element: e, atk, hp, cost });
+  const f = (e: Element, atk: number, hp: number, cost: number) => ({
+    element: e,
+    atk,
+    hp,
+    cost,
+  });
   CARD_STATS = {
     BLAZE_KNIGHT: f("Pyro", 5, 4, 3),
     FROST_ARCHER: f("Cryo", 3, 3, 2),
@@ -159,29 +188,46 @@ if (!Object.keys(CARD_STATS).length) {
 
 /* ===================== Room helpers ===================== */
 function newLobby(seed: string): LobbyState {
-  return { phase: "lobby", ready: { p1: false, p2: false }, rngSeed: seed, lastAction: null };
+  return {
+    phase: "lobby",
+    ready: { p1: false, p2: false },
+    rngSeed: seed,
+    lastAction: null,
+  };
 }
 function getOrCreateRoom(roomId?: string) {
   const id = (roomId || randomUUID().slice(0, 6)).toUpperCase();
   if (!rooms.has(id)) {
     const seed = randomUUID();
-    rooms.set(id, { id, seed, state: newLobby(seed), __ts: Date.now() });
+    rooms.set(id, { id, seed, state: newLobby(seed), lastSeatByUser: {}, __ts: Date.now() });
   }
   const room = rooms.get(id)!;
   touch(room);
-  rooms.set(id, room);
   return { id, room };
 }
-function isLobby(st: RoomState): st is LobbyState { return st.phase === "lobby"; }
-function isPlay(st: RoomState): st is BattleState { return st.phase === "play"; }
+function isLobby(st: RoomState): st is LobbyState {
+  return st.phase === "lobby";
+}
+function isPlay(st: RoomState): st is BattleState {
+  return st.phase === "play";
+}
 
+/** ปรับความถูกต้องของ room โดยไม่ให้ “ย้อนกลับ lobby” */
 function sanitize(room: Room) {
-  if (!room.state || !("phase" in room.state)) room.state = newLobby(room.seed);
-  if (room.p1 && !room.p1.userId) room.p1 = undefined;
-  if (room.p2 && !room.p2.userId) room.p2 = undefined;
+  if (!room.state) room.state = newLobby(room.seed);
+
+  // ถ้าอยู่ใน play แล้ว ห้ามแก้ state กลับ lobby
+  if (isPlay(room.state)) {
+    // เก็บ seat ให้เป็น null ถ้าข้อมูลผู้เล่นไม่ครบ
+    if (room.p1 && !room.p1.userId) room.p1 = null;
+    if (room.p2 && !room.p2.userId) room.p2 = null;
+    return;
+  }
+
+  // เฉพาะตอน lobby ค่อยตรวจเรื่อง userId ซ้ำ
   if (room.p1?.userId && room.p2?.userId && room.p1.userId === room.p2.userId) {
-    room.p2 = undefined;
-    if (isLobby(room.state)) room.state.ready.p2 = false;
+    room.p2 = null;
+    room.state.ready.p2 = false;
   }
 }
 
@@ -190,9 +236,11 @@ function forceSitP1(room: Room, user: PlayerInfo) {
   sanitize(room);
   room.p1 = { ...user };
   if (room.p2?.userId === user.userId) {
-    room.p2 = undefined;
+    room.p2 = null;
     if (isLobby(room.state)) room.state.ready.p2 = false;
   }
+  room.lastSeatByUser = room.lastSeatByUser ?? {};
+  room.lastSeatByUser[user.userId] = "p1";
   touch(room);
 }
 
@@ -383,22 +431,57 @@ export async function POST(req: Request) {
       const { id, room } = getOrCreateRoom(body.roomId);
       sanitize(room);
 
-      if (room.p1?.userId === body.user.userId) {
+      const youId = body.user.userId;
+      room.lastSeatByUser = room.lastSeatByUser ?? {};
+
+      // ถ้าอยู่ใน play → พยายามนั่งที่ seat เดิมของ userId
+      if (isPlay(room.state)) {
+        const lastSeat = room.lastSeatByUser[youId];
+
+        if (lastSeat === "p1") {
+          room.p1 = { ...body.user };
+        } else if (lastSeat === "p2") {
+          room.p2 = { ...body.user };
+        } else {
+          // ไม่เคยมีที่นั่งมาก่อน → ถ้ามีที่ว่างให้นั่ง, ถ้าเต็มแล้วให้แจ้ง full
+          if (!room.p1) {
+            room.p1 = { ...body.user };
+            room.lastSeatByUser[youId] = "p1";
+          } else if (!room.p2) {
+            room.p2 = { ...body.user };
+            room.lastSeatByUser[youId] = "p2";
+          } else {
+            rooms.set(id, room); touch(room);
+            return NextResponse.json({ ok: false, error: "ROOM_FULL_PLAYING" }, { status: 400 });
+          }
+        }
+
+        rooms.set(id, room); touch(room);
+        const you: Side = (room.p1?.userId === youId ? "p1" : "p2");
+        return NextResponse.json({ ok: true, roomId: id, you, players: { p1: room.p1 ?? null, p2: room.p2 ?? null }, state: room.state });
+      }
+
+      // อยู่ใน lobby → จัดที่นั่งปกติ
+      if (room.p1?.userId === youId) {
         room.p1 = body.user; rooms.set(id, room); touch(room);
         return NextResponse.json({ ok: true, roomId: id, you: "p1", players: { p1: room.p1 ?? null, p2: room.p2 ?? null }, state: room.state });
       }
-      if (room.p2?.userId === body.user.userId) {
+      if (room.p2?.userId === youId) {
         room.p2 = body.user; rooms.set(id, room); touch(room);
         return NextResponse.json({ ok: true, roomId: id, you: "p2", players: { p1: room.p1 ?? null, p2: room.p2 ?? null }, state: room.state });
       }
 
-      if (!room.p2) {
-        room.p2 = body.user; rooms.set(id, room); touch(room);
-        return NextResponse.json({ ok: true, roomId: id, you: "p2", players: { p1: room.p1 ?? null, p2: room.p2 ?? null }, state: room.state });
-      }
       if (!room.p1) {
-        room.p1 = body.user; rooms.set(id, room); touch(room);
+        room.p1 = body.user;
+        room.lastSeatByUser[youId] = "p1";
+        rooms.set(id, room); touch(room);
         return NextResponse.json({ ok: true, roomId: id, you: "p1", players: { p1: room.p1 ?? null, p2: room.p2 ?? null }, state: room.state });
+      }
+      if (!room.p2) {
+        room.p2 = body.user;
+        room.lastSeatByUser[youId] = "p2";
+        rooms.set(id, room); touch(room);
+        return NextResponse.json({ ok: true, roomId: id, you: "p2", players: { p1: room.p1 ?? null, p2: room.p2 ?? null }, state: room.state });
       }
 
       return NextResponse.json({ ok: false, error: "ROOM_FULL" }, { status: 400 });
@@ -407,9 +490,18 @@ export async function POST(req: Request) {
     if (body.action === "leave") {
       const r = rooms.get(body.roomId);
       if (!r) return NextResponse.json({ ok: true });
-      if (r.p1?.userId === body.userId) { r.p1 = undefined; if (isLobby(r.state)) r.state.ready.p1 = false; }
-      if (r.p2?.userId === body.userId) { r.p2 = undefined; if (isLobby(r.state)) r.state.ready.p2 = false; }
-      sanitize(r); rooms.set(r.id, r); touch(r);
+
+      // ใน play: แค่เคลียร์ seat แต่ state ยังเป็น play ให้ reconnect ได้
+      if (isPlay(r.state)) {
+        if (r.p1?.userId === body.userId) r.p1 = null;
+        if (r.p2?.userId === body.userId) r.p2 = null;
+      } else {
+        // ใน lobby: เคลียร์ พร้อม reset ready ของที่นั่งนั้น
+        if (r.p1?.userId === body.userId) { r.p1 = null; r.state.ready.p1 = false; }
+        if (r.p2?.userId === body.userId) { r.p2 = null; r.state.ready.p2 = false; }
+      }
+
+      rooms.set(r.id, r); touch(r);
       return NextResponse.json({ ok: true });
     }
 
@@ -433,8 +525,9 @@ export async function POST(req: Request) {
       const { room } = getOrCreateRoom(body.roomId);
       sanitize(room);
 
+      // ถ้าเข้าสู่ play แล้ว ห้าม ready อีก (แค่ส่ง state ปัจจุบันกลับ)
       if (!isLobby(room.state)) {
-        touch(room);
+        rooms.set(room.id, room); touch(room);
         return NextResponse.json({ ok: true, full: true, state: room.state });
       }
 
@@ -446,8 +539,10 @@ export async function POST(req: Request) {
       room.state.ready[side] = true;
 
       if (room.p1 && room.p2 && room.state.ready.p1 && room.state.ready.p2) {
+        // ล็อกสู่ play (one-way)
         room.state = startPlayFromLobby(room.state);
       }
+
       rooms.set(room.id, room); touch(room);
       const full = room.state.phase === "play";
       return NextResponse.json({
