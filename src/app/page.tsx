@@ -5,8 +5,8 @@ import { useRouter } from "next/navigation";
 import { signIn, signOut, useSession } from "next-auth/react";
 import Image from "next/image";
 
-/** helper เรียก API game */
-async function post<T = unknown>(body: unknown): Promise<T> {
+/** เรียก API game */
+async function post<T = any>(body: unknown): Promise<T> {
   const res = await fetch("/api/game", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -17,7 +17,18 @@ async function post<T = unknown>(body: unknown): Promise<T> {
     const txt = await res.text().catch(() => "");
     throw new Error(txt || res.statusText);
   }
-  return (await res.json()) as T;
+  return res.json() as Promise<T>;
+}
+
+/** userId เสถียรทั้งแอป (เหมือนใน useGame.ts) */
+function stableUserId(session: any): string {
+  if (typeof window === "undefined") return "ssr";
+  const authId = (session?.user as any)?.id ?? session?.user?.email ?? null;
+  if (authId) return String(authId);
+  const key = "NOF_guestId";
+  let id = localStorage.getItem(key);
+  if (!id) { id = crypto.randomUUID(); localStorage.setItem(key, id); }
+  return id;
 }
 
 function randRoom(len = 6) {
@@ -34,9 +45,8 @@ export default function Home() {
   const [createCode, setCreateCode] = useState<string>(randRoom());
   const [joinCode, setJoinCode] = useState<string>("");
 
-  // ✅ ไม่ใช้ any แล้ว เพราะเรา extend type ของ Session ไว้ใน next-auth.d.ts
   const user = useMemo(() => {
-    const id = session?.user?.id ?? session?.user?.email ?? "guest";
+    const id = stableUserId(session); // << ใช้เหมือน useGame
     return {
       userId: id,
       name: session?.user?.name ?? "Player",
@@ -47,15 +57,12 @@ export default function Home() {
   async function onCreate() {
     try {
       const roomId = (createCode || randRoom()).toUpperCase();
-      const res = await post<{ ok: boolean; roomId: string }>({
-        action: "createRoom",
-        roomId,
-        user,
-      });
+      const res = await post<{ ok: boolean; roomId: string }>(
+        { action: "createRoom", roomId, user }
+      );
       router.push(`/play/${res.roomId}`);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      alert(`Create failed: ${msg}`);
+    } catch (e: any) {
+      alert(`Create failed: ${e?.message || "unknown"}`);
     }
   }
 
@@ -63,15 +70,12 @@ export default function Home() {
     try {
       const roomId = (joinCode || "").trim().toUpperCase();
       if (!roomId) return alert("กรอกรหัสห้องก่อนนะ");
-      const res = await post<{ ok: boolean; roomId: string }>({
-        action: "joinRoom",
-        roomId,
-        user,
-      });
+      const res = await post<{ ok: boolean; roomId: string }>(
+        { action: "joinRoom", roomId, user }
+      );
       router.push(`/play/${res.roomId}`);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      alert(`Join failed: ${msg}`);
+    } catch (e: any) {
+      alert(`Join failed: ${e?.message || "unknown"}`);
     }
   }
 
@@ -123,7 +127,9 @@ export default function Home() {
               Create
             </button>
           </div>
-          <p className="mt-2 text-xs opacity-70">โฮสต์จะถูกกำหนดเป็นฝั่ง p1 โดยอัตโนมัติ</p>
+          <p className="mt-2 text-xs opacity-70">
+            โฮสต์จะถูกกำหนดเป็นฝั่ง p1 โดยอัตโนมัติ
+          </p>
         </div>
 
         {/* join */}

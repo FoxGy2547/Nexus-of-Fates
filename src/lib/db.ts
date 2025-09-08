@@ -1,30 +1,28 @@
-import mysql from "mysql2/promise";
+import { createPool as mysqlCreatePool, Pool, PoolOptions } from "mysql2/promise";
 
-let _pool: mysql.Pool | null = null;
-
-/** คืน Pool แบบ lazy; ถ้า ENV ไม่ครบจะคืน null (เพื่อให้โหมด fallback ทำงานต่อได้) */
-export function getPool(): mysql.Pool | null {
-  if (_pool) return _pool;
-
-  const { DB_HOST, DB_USER, DB_PASS, DB_NAME, DB_PORT } = process.env;
-  if (!DB_HOST || !DB_USER || !DB_NAME) return null;
-
-  _pool = mysql.createPool({
-    host: DB_HOST,
-    user: DB_USER,
-    password: DB_PASS,
-    database: DB_NAME,
-    port: DB_PORT ? Number(DB_PORT) : 3306,
-    waitForConnections: true,
-    connectionLimit: 5,
-    charset: "utf8mb4_general_ci",
-  });
-  return _pool;
+/** กัน HMR/Hot-reload สร้าง pool ใหม่ */
+declare global {
+  // eslint-disable-next-line no-var
+  var __MYSQL_POOL__: Pool | undefined;
 }
 
-/** เวอร์ชันที่ต้องการ DB แน่ ๆ (แต่ถ้าไม่มีจะ throw) */
-export async function createPool(): Promise<mysql.Pool> {
-  const p = getPool();
-  if (!p) throw new Error("DB ENV not set");
-  return p;
+export function getPool(): Pool {
+  if (global.__MYSQL_POOL__) return global.__MYSQL_POOL__;
+
+  const opts: PoolOptions = {
+    host: process.env.DB_HOST!,
+    user: process.env.DB_USER!,
+    password: process.env.DB_PASS!,
+    database: process.env.DB_NAME!,
+    waitForConnections: true,
+    connectionLimit: 5,       // dev พอ 3–5 ก็พอ
+    queueLimit: 0,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 10000,
+    multipleStatements: false,
+  };
+
+  const pool = mysqlCreatePool(opts);
+  global.__MYSQL_POOL__ = pool;
+  return pool;
 }

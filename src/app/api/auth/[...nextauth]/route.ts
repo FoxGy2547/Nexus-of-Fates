@@ -1,23 +1,16 @@
 import NextAuth, { type NextAuthOptions } from "next-auth";
 import DiscordProvider from "next-auth/providers/discord";
-import { createPool } from "@/lib/db";
-import type { Pool, RowDataPacket } from "mysql2/promise";
+import { getPool } from "@/lib/db"; // ✅ ใช้ singleton pool ตัวเดียวทั้งแอป
+import type { RowDataPacket } from "mysql2/promise";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/** cache ให้ไม่สร้าง connection pool ใหม่ทุกรอบ */
-let poolPromise: Promise<Pool> | null = null;
-function getPool(): Promise<Pool> {
-  if (!poolPromise) poolPromise = createPool();
-  return poolPromise!;
-}
-
-/** ขยาย type ให้ token มี uid และ session.user.id ใช้งานได้ */
+/* ── module augmentation: เพิ่มฟิลด์ที่อยากใส่ใน token/session ── */
 declare module "next-auth/jwt" {
   interface JWT {
-    uid?: string;
-    name?: string | null;
+    uid?: string;         // user id ภายในระบบ (หรือ discord id)
+    name?: string | null; // ปล่อยให้ next-auth เก็บได้
     picture?: string | null;
   }
 }
@@ -32,14 +25,14 @@ declare module "next-auth" {
   }
 }
 
-interface UserIdRow extends RowDataPacket {
-  id: number;
-}
+type UserIdRow = RowDataPacket & { id: number };
 type MaybeDiscordProfile = Partial<
   Record<"email" | "global_name" | "username" | "name" | "image_url" | "avatar", string>
 >;
 
-/** 🚫 อย่า export ตัวนี้ออกไปนะ ไม่งั้น Next.js จะ error */
+/* ────────────────────────────────────────────────────────────── */
+/*                  NextAuth main configuration                  */
+/* ────────────────────────────────────────────────────────────── */
 const authOptions: NextAuthOptions = {
   session: { strategy: "jwt" },
   providers: [
@@ -49,46 +42,82 @@ const authOptions: NextAuthOptions = {
       authorization: { params: { scope: "identify email" } },
     }),
   ],
+
   callbacks: {
-    async jwt({ token, account, user, profile }) {
-      const discordId =
-        account?.provider === "discord" ? account.providerAccountId : token.sub ?? "";
-
-      const p: MaybeDiscordProfile | null = (profile ?? null) as MaybeDiscordProfile | null;
-
-      const email: string | null = token.email ?? user?.email ?? p?.email ?? null;
-      const username: string | null =
-        token.name ?? user?.name ?? p?.global_name ?? p?.username ?? p?.name ?? null;
-      const avatar: string | null = token.picture ?? user?.image ?? p?.image_url ?? p?.avatar ?? null;
-
-      let uid = discordId;
-
+    /** 
+     * signIn: เรียก "ครั้งสำคัญ" ตอนล็อกอินเท่านั้น
+     * -> อัพเซิร์ตผู้ใช้ใน DB ตรงนี้ เพื่อไม่ให้ jwt callback ยิง DB ถี่ ๆ
+     */
+    async signIn({ user, account, profile }) {
       try {
-        const pool = await getPool();
-        await pool.query(
-          `INSERT INTO users (discord_id, email, username, avatar)
-           VALUES (?, ?, ?, ?)
-           ON DUPLICATE KEY UPDATE
-             email = VALUES(email),
-             username = VALUES(username),
-             avatar = VALUES(avatar)`,
-          [discordId, email, username, avatar]
-        );
-        const [rows] = await pool.execute<UserIdRow[]>(
-          "SELECT id FROM users WHERE discord_id = ? LIMIT 1",
-          [discordId]
-        );
-        if (rows.length) uid = String(rows[0].id);
-      } catch (e) {
-        console.warn("[nextauth] DB skipped:", e);
-      }
+        const pool = getPool();
 
-      token.uid = uid;
-      if (username !== null && username !== undefined) token.name = username;
-      if (avatar !== null && avatar !== undefined) token.picture = avatar;
+        const discordId =
+          account?.provider === "discord" ? account.providerAccountId : null;
+
+        const p = (profile ?? {}) as MaybeDiscordProfile;
+
+        const email =
+          user?.email ??
+          p.email ??
+          null;
+
+        const username =
+          user?.name ??
+          p.global_name ??
+          p.username ??
+          p.name ??
+          null;
+
+        const avatar =
+          (user as any)?.image ??
+          p.image_url ??
+          p.avatar ??
+          null;
+
+        // มี discordId ถึงจะอัพเซิร์ต
+        if (discordId) {
+          await pool.query(
+            `INSERT INTO users (discord_id, email, username, avatar)
+             VALUES (?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE
+               email = VALUES(email),
+               username = VALUES(username),
+               avatar = VALUES(avatar)`,
+            [discordId, email, username, avatar]
+          );
+        }
+      } catch (e: any) {
+        // ถ้า connection เต็ม/DB ล่ม ให้ข้ามได้ ไม่ต้อง fail login ทั้งหมด
+        console.warn("[nextauth] signIn upsert skipped:", e?.code || e?.message);
+      }
+      return true;
+    },
+
+    /**
+     * jwt: เบา ๆ — ไม่แตะ DB
+     * ใส่เฉพาะข้อมูลที่ต้องการติดไปกับ token ก็พอ
+     */
+    async jwt({ token, account, user, profile }) {
+      // ใช้ discord id เป็น uid (ถ้าไม่มี ก็ fallback เป็น sub เดิม)
+      const uid =
+        account?.provider === "discord"
+          ? account.providerAccountId
+          : token.sub ?? undefined;
+      if (uid) token.uid = uid;
+
+      // อัปเดตชื่อ/รูปถ้ามีข้อมูลเข้ามารอบแรก
+      const p = (profile ?? {}) as MaybeDiscordProfile;
+      const name = user?.name ?? token.name ?? p.global_name ?? p.username ?? p.name ?? null;
+      const picture = (user as any)?.image ?? token.picture ?? p.image_url ?? p.avatar ?? null;
+
+      if (name !== undefined) token.name = name;
+      if (picture !== undefined) token.picture = picture;
 
       return token;
     },
+
+    /** map token → session (ฝั่ง client ใช้งาน) */
     async session({ session, token }) {
       if (session.user) {
         session.user.id = token.uid ?? token.sub ?? session.user.email ?? undefined;
@@ -97,6 +126,7 @@ const authOptions: NextAuthOptions = {
       }
       return session;
     },
+
     async redirect({ url, baseUrl }) {
       if (url.startsWith(baseUrl)) return url;
       if (url.startsWith("/")) return `${baseUrl}${url}`;
