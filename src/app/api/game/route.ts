@@ -91,13 +91,9 @@ function safeStringify(v: unknown): string | null {
   if (v === undefined || v === null) return null;
   try { return JSON.stringify(v); } catch { return null; }
 }
-function maybeParse<T>(v: unknown): T | undefined {
-  if (v === null || v === undefined) return undefined;
-  if (typeof v === "string") {
-    try { return JSON.parse(v) as T; } catch { return undefined; }
-  }
-  if (typeof v === "object") return v as T;
-  return undefined;
+function parseJSON<T>(s: string | null | undefined): T | undefined {
+  if (!s) return undefined;
+  try { return JSON.parse(s) as T; } catch { return undefined; }
 }
 
 class MySQLStore implements Store {
@@ -116,25 +112,28 @@ class MySQLStore implements Store {
     const pool = getPool();
 
     type RoomRow = RowDataPacket & {
-      id: string; seed: string;
-      p1: any; p2: any; state: any;
+      id: string;
+      seed: string;
+      p1: string | null;
+      p2: string | null;
+      state: string;
       updatedAt: number | null;
     };
 
     const [rows] = await pool.query<RoomRow[]>(
       `SELECT id, seed, p1, p2, state, UNIX_TIMESTAMP(updated_at)*1000 AS updatedAt
-       FROM rooms WHERE id=? LIMIT 1`, [id]
+       FROM rooms WHERE id=? LIMIT 1`,
+      [id]
     );
-
     if (!rows || rows.length === 0) return null;
-    const r = rows[0];
 
+    const r = rows[0];
     return {
       id: r.id,
       seed: r.seed,
-      p1: maybeParse<PlayerInfo>(r.p1),
-      p2: maybeParse<PlayerInfo>(r.p2),
-      state: (typeof r.state === "string" ? JSON.parse(r.state) : r.state) as RoomState,
+      p1: parseJSON<PlayerInfo>(r.p1),
+      p2: parseJSON<PlayerInfo>(r.p2),
+      state: parseJSON<RoomState>(r.state) ?? { phase: "lobby", ready: { p1: false, p2: false }, rngSeed: r.seed, lastAction: null },
       updatedAt: r.updatedAt ?? Date.now(),
     };
   }
@@ -176,7 +175,7 @@ class MemoryStore implements Store {
 
 const store: Store = hasDbEnv ? new MySQLStore() : new MemoryStore();
 
-/* ===== purge แบบปลอดภัย (ไม่ต้อง SET GLOBAL) ===== */
+/* ===== purge แบบไม่ต้อง SET GLOBAL ===== */
 let lastPurge = 0;
 const PURGE_EVERY_MS = 5 * 60 * 1000;
 async function maybePurgeOldRooms() {
@@ -187,7 +186,7 @@ async function maybePurgeOldRooms() {
   try {
     const pool = getPool();
     await pool.query(`DELETE FROM rooms WHERE updated_at < NOW() - INTERVAL 12 HOUR`);
-  } catch { /* เงียบ ๆ */ }
+  } catch { /* ignore */ }
 }
 
 /* ===================== RNG / utils ===================== */
@@ -225,9 +224,14 @@ function rollDice(seed: string, n = 10): DicePool {
 
 /* ===================== Card stats (no any) ===================== */
 type CardStat = { atk: number; hp: number; element: Element; ability?: string; cost: number };
-declare global { var __NOF_CARD_STATS__: Record<string, CardStat> | undefined; }
-// eslint-disable-next-line no-var
-let CARD_STATS: Record<string, CardStat> = globalThis.__NOF_CARD_STATS__ ?? (globalThis.__NOF_CARD_STATS__ = {} as any);
+
+declare global {
+  var __NOF_CARD_STATS__: Record<string, CardStat> | undefined;
+}
+
+let CARD_STATS: Record<string, CardStat> =
+  globalThis.__NOF_CARD_STATS__ ?? (globalThis.__NOF_CARD_STATS__ = {} as Record<string, CardStat>);
+
 if (!Object.keys(CARD_STATS).length) {
   const f = (e: Element, atk: number, hp: number, cost: number): CardStat => ({ element: e, atk, hp, cost });
   CARD_STATS = {
@@ -362,18 +366,32 @@ function doAttack(st: BattleState, side: Side, idx: number) {
     return { ok: true, patch: { hero: st.hero, lastAction: st.lastAction } } as const;
   }
 }
+
 function doEndPhase(st: BattleState, side: Side) {
   if (st.phaseEnded[side]) return { ok: true } as const;
+
   st.phaseEnded[side] = true;
   st.lastAction = { kind: "endPhase", side, phaseNo: st.phaseNo };
+
   if (st.phaseEnded.p1 && st.phaseEnded.p2) {
-    st.phaseNo += 1; st.phaseStarter = side; st.turn = st.phaseStarter; st.phaseEnded = { p1: false, p2: false };
+    st.phaseNo += 1;
+    st.phaseStarter = side;
+    st.turn = st.phaseStarter;
+    st.phaseEnded = { p1: false, p2: false };
+
     st.dice.p1 = rollDice(`${st.rngSeed}:phase:${st.phaseNo}:p1`, 10);
     st.dice.p2 = rollDice(`${st.rngSeed}:phase:${st.phaseNo}:p2`, 10);
-    st.hand.p1.push(...st.deck.p1.splice(0, 4));
-    st.hand.p2.push(...st.deck.p2.splice(0, 4));
+
+    // จั่วการ์ดใหม่ให้ทั้งสองฝั่ง — อย่าใช้ p1/p2 แบบตัวแปร
+    (["p1", "p2"] as const).forEach(s => {
+      st.hand[s].push(...st.deck[s].splice(0, 4));
+    });
   }
-  return { ok: true, patch: { lastAction: st.lastAction, dice: st.dice, hand: st.hand, turn: st.turn } } as const;
+
+  return {
+    ok: true,
+    patch: { lastAction: st.lastAction, dice: st.dice, hand: st.hand, turn: st.turn }
+  } as const;
 }
 
 type ApplyOk = { ok: true; patch?: Partial<BattleState> | null; winner?: Side | null };
