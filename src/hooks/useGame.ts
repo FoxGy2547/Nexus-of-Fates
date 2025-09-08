@@ -1,37 +1,40 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-/* ---------- types ที่ปราศจาก any / {} ---------- */
-type Side = "p1" | "p2";
+/* ============= Types (ขั้นต่ำที่ใช้จริง) ============= */
+export type Side = "p1" | "p2";
+type DicePool = Record<string, number>;
 
-/** payload สำหรับ /api/game */
-type GameActionPayload =
-  | { kind: "playCard"; index: number }
-  | { kind: "attack"; index: number }
-  | { kind: "endTurn" }
-  | { kind: "endPhase" }
-  | Record<string, unknown>;
-
-type PostCreateRoom = { ok: boolean; roomId: string; you?: Side; state?: unknown };
-type PostJoinRoom   = {
-  ok: boolean;
-  roomId: string;
-  you: Side | "-";
-  players?: { p1: Record<string, unknown> | null; p2: Record<string, unknown> | null };
-  state?: unknown;
+export type PlayerInfo = {
+  userId: string;
+  name?: string | null;
+  avatar?: string | null;
 };
-type PostPlayers    = { ok: boolean; players: { p1: Record<string, unknown> | null; p2: Record<string, unknown> | null } };
-type PostState      = {
-  ok: boolean;
-  state: unknown;
-  players?: { p1: Record<string, unknown> | null; p2: Record<string, unknown> | null };
-};
-type PostReady      = { ok: boolean; full?: boolean; state?: unknown; patch?: Record<string, unknown> };
-type PostAction     = { ok: boolean; patch: unknown | null; winner: Side | null };
 
-/* ---------- utils ---------- */
-async function postJSON<T>(body: unknown): Promise<T> {
+export type UnitVM = { code: string; attack: number; hp: number; element: string };
+
+export type ClientState =
+  | null
+  | {
+      mode?: "lobby" | "play";
+      turn: Side;
+      phaseNo?: number;
+      hero: Record<Side, number>;
+      dice: Record<Side, DicePool>;
+      board: Record<Side, UnitVM[]>;
+      hand: Record<Side, string[]>;
+      ready?: { p1: boolean; p2: boolean };
+    };
+
+export type PlayersVM = {
+  p1: { userId: string; name?: string | null; avatar?: string | null } | null;
+  p2: { userId: string; name?: string | null; avatar?: string | null } | null;
+};
+
+/* ============= helpers ============= */
+
+async function postJSON<TResp>(body: unknown): Promise<TResp> {
   const res = await fetch("/api/game", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -39,163 +42,184 @@ async function postJSON<T>(body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    // แปลงเป็นข้อความให้ครบ ๆ ไม่ใช้ any
-    const msg = (await res.text().catch(() => "")) || res.statusText;
-    throw new Error(msg);
+    const txt = await res.text().catch(() => "");
+    throw new Error(txt || res.statusText);
   }
-  return (await res.json()) as T;
+  return (await res.json()) as TResp;
 }
 
-/** สร้าง userId ที่เสถียร (ไม่พึ่ง any) */
-function stableUserId(session: unknown): string {
-  // โครงสร้าง session ที่เราใช้จริง
-  type MaybeSess = {
-    user?: { id?: string; email?: string | null } | null;
-  };
-
+/** สร้าง guest id ที่เสถียร เพื่อระบุตัวผู้เล่นฝั่ง client */
+function stableUserId(): string {
   if (typeof window === "undefined") return "ssr";
-  const s = (session ?? {}) as MaybeSess;
-  const authId = s.user?.id ?? s.user?.email ?? null;
-  if (authId) return String(authId);
-
   const key = "NOF_guestId";
-  let id = window.localStorage.getItem(key);
+  let id = localStorage.getItem(key);
   if (!id) {
-    id = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
-    window.localStorage.setItem(key, id);
+    id = crypto.randomUUID();
+    localStorage.setItem(key, id);
   }
   return id;
 }
 
-/* ---------- hook หลัก ---------- */
-export function useGame(roomId: string, session?: unknown) {
-  const mounted = useRef(false);
-
-  const youRef = useRef<Side | "-">("-");
+/* ============= Hook ============= */
+export function useGame(roomId: string) {
+  // state หลักที่เพจใช้
+  const [state, setState] = useState<ClientState>(null);
+  const [players, setPlayers] = useState<PlayersVM>({ p1: null, p2: null });
   const [you, setYou] = useState<Side | "-">("-");
-  const [players, setPlayers] = useState<{ p1: Record<string, unknown> | null; p2: Record<string, unknown> | null }>({
-    p1: null,
-    p2: null,
-  });
-  const [state, setState] = useState<unknown>(null);
 
-  const user = useMemo(() => {
-    // โครงสร้าง session ที่ใช้ชื่อ/รูป
-    type MaybeSess = {
-      user?: { name?: string | null; image?: string | null } | null;
-    };
-    const s = (session ?? {}) as MaybeSess;
-    return {
-      userId: stableUserId(session),
-      name: s.user?.name ?? "Player",
-      avatar: s.user?.image ?? null,
-    };
-  }, [session]);
+  // เก็บ you แบบ ref เพื่อกันการเขียนทับโดยโพลล์
+  const youRef = useRef<Side | "-">("-");
+  const roomRef = useRef(roomId);
+  roomRef.current = roomId;
 
-  /* ----- join room (ครั้งแรก) ----- */
+  // ตั้งค่า you “ครั้งเดียวจากคำสั่งสร้าง/เข้าห้อง” เท่านั้น
+  const setYouOnce = useCallback((side: Side) => {
+    youRef.current = side;
+    setYou(side);
+  }, []);
+
+  // ------------- โพลล์สถานะ -------------
   useEffect(() => {
-    mounted.current = true;
+    let stop = false;
 
-    (async () => {
-      if (!roomId) return;
-
-      // ถ้าห้องยังไม่มีให้สร้างก่อน (ไม่ซีเรียส response)
+    async function tick() {
       try {
-        await postJSON<PostCreateRoom>({ action: "createRoom", roomId, user });
-      } catch {
-        /* ignore */
-      }
+        const res = await postJSON<{
+          ok: boolean;
+          state?: unknown;
+          players?: PlayersVM;
+          you?: Side | "-";
+        }>({ action: "state", roomId: roomRef.current });
 
-      // join ห้อง
-      try {
-        const res = await postJSON<PostJoinRoom>({ action: "joinRoom", roomId, user });
-        if (!mounted.current) return;
-        youRef.current = res.you;
-        setYou(res.you);
+        // อัปเดต you เฉพาะกรณี server ส่งมาเป็น p1/p2 เท่านั้น
+        if (res.you === "p1" || res.you === "p2") {
+          youRef.current = res.you;
+          setYou(res.you);
+        }
+
         if (res.players) setPlayers(res.players);
-        if (typeof res.state !== "undefined") setState(res.state);
-      } catch (err) {
-        console.error("[useGame] joinRoom failed:", err);
-      }
-    })();
 
-    return () => {
-      mounted.current = false;
-    };
-  }, [roomId, user.userId]); // เปลี่ยนเฉพาะเมื่อจริง ๆ เปลี่ยน
-
-  /* ----- โพลสถานะเป็นระยะ ----- */
-  useEffect(() => {
-    if (!roomId) return;
-
-    let timer: number | undefined;
-
-    const tick = async () => {
-      try {
-        const res = await postJSON<PostState>({ action: "state", roomId });
-        if (!mounted.current) return;
-        if (res.players) setPlayers(res.players);
-        setState(res.state);
-      } catch (err) {
-        console.error("[useGame] poll state failed:", err);
+        // อัปเดต state แบบ type-safe
+        setState((prev: ClientState) => {
+          // ถ้า server ส่ง state มาให้ทั้งก้อน ก็ใช้เลย
+          if (typeof res.state === "object" && res.state !== null) {
+            return res.state as ClientState;
+          }
+          // ไม่งั้นคงค่าเดิม (กันจอดำ)
+          return prev;
+        });
       } finally {
-        // โพลต่อทุก ~900ms
-        timer = window.setTimeout(tick, 900);
+        if (!stop) setTimeout(tick, 1000);
       }
-    };
+    }
 
-    timer = window.setTimeout(tick, 300);
+    tick();
     return () => {
-      if (timer) window.clearTimeout(timer);
+      stop = true;
     };
+  }, []);
+
+  // ------------- คำสั่งฝั่งผู้เล่น -------------
+  const ready = useCallback(async () => {
+    const user: PlayerInfo = {
+      userId: stableUserId(),
+      name: undefined,
+      avatar: undefined,
+    };
+    // เรียก ready กับ side ปัจจุบัน (ถ้าไม่รู้ ให้ server ระบุจาก userId)
+    const res = await postJSON<{
+      ok: boolean;
+      full?: boolean;
+      state?: unknown;
+      patch?: unknown;
+    }>({
+      action: "ready",
+      roomId,
+      userId: user.userId,
+    });
+
+    // ป้องกันจอดำ: ถ้า server ส่ง state ใหม่มา ใช้แทนทันที
+    setState((prev: ClientState) => {
+      if (typeof res.state === "object" && res.state !== null) {
+        return res.state as ClientState;
+      }
+      return prev;
+    });
   }, [roomId]);
 
-  /* ----- commands ----- */
-  const ready = useCallback(async () => {
-    const side = youRef.current === "-" ? undefined : youRef.current;
-    const res = await postJSON<PostReady>({ action: "ready", roomId, side, userId: user.userId });
-    if (typeof res.state !== "undefined") setState(res.state);
-  }, [roomId, user.userId]);
-
-  const action = useCallback(
-    async (payload: GameActionPayload) => {
-      const side = (youRef.current === "p1" || youRef.current === "p2") ? youRef.current : "p1";
-      const res = await postJSON<PostAction>({ action: "action", roomId, side, payload });
-      if (!res.ok) return;
-      if (res.patch && typeof state === "object" && state !== null) {
-        // รวม patch แบบปลอดภัย โดยไม่ใช้ any
-        setState((prev: unknown) => {
-          if (
-            typeof prev === "object" &&
-            prev !== null &&
-            typeof res.patch === "object" &&
-            res.patch !== null
-          ) {
-            return {
-              ...(prev as Record<string, unknown>),
-              ...(res.patch as Record<string, unknown>),
-            };
-          }
-          return prev ?? (res.patch as unknown) ?? null;
-        });
+  const endTurn = useCallback(async () => {
+    const res = await postJSON<{ ok: boolean; patch?: unknown }>({
+      action: "action",
+      roomId,
+      side: (youRef.current === "p1" || youRef.current === "p2" ? youRef.current : "p1") as Side,
+      payload: { kind: "endTurn" },
+    });
+    setState((prev: ClientState) => {
+      if (typeof res.patch === "object" && res.patch !== null && typeof prev === "object" && prev) {
+        return { ...(prev as Record<string, unknown>), ...(res.patch as Record<string, unknown>) } as ClientState;
       }
+      return prev;
+    });
+  }, [roomId]);
+
+  const endPhase = useCallback(async () => {
+    const res = await postJSON<{ ok: boolean; patch?: unknown }>({
+      action: "action",
+      roomId,
+      side: (youRef.current === "p1" || youRef.current === "p2" ? youRef.current : "p1") as Side,
+      payload: { kind: "endPhase" },
+    });
+    setState((prev: ClientState) => {
+      if (typeof res.patch === "object" && res.patch !== null && typeof prev === "object" && prev) {
+        return { ...(prev as Record<string, unknown>), ...(res.patch as Record<string, unknown>) } as ClientState;
+      }
+      return prev;
+    });
+  }, [roomId]);
+
+  const playCard = useCallback(
+    async (index: number) => {
+      const res = await postJSON<{ ok: boolean; patch?: unknown }>({
+        action: "action",
+        roomId,
+        side: (youRef.current === "p1" || youRef.current === "p2" ? youRef.current : "p1") as Side,
+        payload: { kind: "playCard", index },
+      });
+      setState((prev: ClientState) => {
+        if (typeof res.patch === "object" && res.patch !== null && typeof prev === "object" && prev) {
+          return { ...(prev as Record<string, unknown>), ...(res.patch as Record<string, unknown>) } as ClientState;
+        }
+        return prev;
+      });
     },
-    [roomId, state]
+    [roomId]
   );
 
-  const playCard = useCallback((index: number) => action({ kind: "playCard", index }), [action]);
-  const endTurn   = useCallback(() => action({ kind: "endTurn" }), [action]);
-  const endPhase  = useCallback(() => action({ kind: "endPhase" }), [action]);
-  const attackActive = useCallback(() => action({ kind: "attack", index: 0 }), [action]);
+  const attackActive = useCallback(async () => {
+    const res = await postJSON<{ ok: boolean; patch?: unknown }>({
+      action: "action",
+      roomId,
+      side: (youRef.current === "p1" || youRef.current === "p2" ? youRef.current : "p1") as Side,
+      payload: { kind: "attack", index: 0 },
+    });
+    setState((prev: ClientState) => {
+      if (typeof res.patch === "object" && res.patch !== null && typeof prev === "object" && prev) {
+        return { ...(prev as Record<string, unknown>), ...(res.patch as Record<string, unknown>) } as ClientState;
+      }
+      return prev;
+    });
+  }, [roomId]);
 
   return {
     you,
     players,
     state,
     ready,
-    playCard,
     endTurn,
     endPhase,
+    playCard,
     attackActive,
+    // util เผื่อเพจอยากใช้
+    setYouOnce,
   };
 }
