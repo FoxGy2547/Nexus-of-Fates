@@ -1,3 +1,4 @@
+// app/api/game/route.ts
 import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import { getPool } from "@/lib/db";
@@ -138,7 +139,6 @@ type RoomRow = RowDataPacket & {
   p1: string | null;
   p2: string | null;
   state: string | null;
-  // updated_at: Date (ไม่จำเป็นต้องใช้ในโค้ดนี้)
 };
 
 function parsePlayer(json: string | null): PlayerInfo | null {
@@ -362,13 +362,44 @@ function hasActionField(v: unknown): v is { action: Body["action"] } {
   return typeof v === "object" && v !== null && typeof (v as Record<string, unknown>).action === "string";
 }
 
+function envOk() {
+  return !!(process.env.DB_HOST && process.env.DB_USER && process.env.DB_NAME);
+}
+
 export async function POST(req: Request) {
+  const reqId = randomUUID();
+  const t0 = Date.now();
   try {
-    const raw = await req.json().catch(() => null);
+    const url = new URL(req.url);
+    const diag = url.searchParams.get("diag") === "1";
+
+    const rawText = await req.text();
+    let raw: unknown = null;
+    try { raw = rawText ? JSON.parse(rawText) : null; } catch {
+      console.error(`[api/game][${reqId}] BAD_JSON body=`, rawText?.slice(0, 500));
+      return NextResponse.json({ ok: false, reqId, error: "BAD_JSON" }, { status: 400 });
+    }
+
+    console.log(`[api/game][${reqId}] start ua="${req.headers.get("user-agent")}" ip="${req.headers.get("x-forwarded-for") || "?"}" env=${envOk() ? "ok" : "missing"}`);
+
     if (!hasActionField(raw)) {
-      return NextResponse.json({ ok: false, error: "BAD_BODY" }, { status: 400 });
+      return NextResponse.json({ ok: false, reqId, error: "BAD_BODY" }, { status: 400 });
     }
     const body = raw as Body;
+
+    if (!envOk()) {
+      throw new Error("ENV_MISSING: DB_HOST/DB_USER/DB_NAME not set");
+    }
+
+    if (diag) {
+      try {
+        const pool = getPool();
+        const [rows] = await pool.query("SELECT 1 as ok");
+        console.log(`[api/game][${reqId}] DB ping:`, rows);
+      } catch (e: any) {
+        console.error(`[api/game][${reqId}] DB_PING_FAIL:`, e?.message || e);
+      }
+    }
 
     if (body.action === "createRoom") {
       const roomId = (body.roomId || randomUUID().slice(0, 6)).toUpperCase();
@@ -377,7 +408,9 @@ export async function POST(req: Request) {
       room.p2 = room.p2 ?? null;
       room.state = isLobby(room.state) ? room.state : newLobby(room.seed);
       await saveRoom(room);
-      return NextResponse.json({ ok: true, roomId, you: "p1" as const, players: { p1: room.p1, p2: room.p2 }, state: room.state });
+      const ms = Date.now() - t0;
+      console.log(`[api/game][${reqId}] createRoom ${roomId} in ${ms}ms`);
+      return NextResponse.json({ ok: true, reqId, roomId, you: "p1" as const, players: { p1: room.p1, p2: room.p2 }, state: room.state });
     }
 
     if (body.action === "joinRoom") {
@@ -388,14 +421,15 @@ export async function POST(req: Request) {
       } else if (!room.p2) {
         room.p2 = body.user;
       } else {
-        // อนุญาตนั่งทับฝั่งเดิมได้ถ้า userId ตรง
         if (room.p1.userId === body.user.userId) room.p1 = body.user;
         else if (room.p2.userId === body.user.userId) room.p2 = body.user;
-        else return NextResponse.json({ ok: false, error: "ROOM_FULL" }, { status: 400 });
+        else return NextResponse.json({ ok: false, reqId, error: "ROOM_FULL" }, { status: 400 });
       }
       await saveRoom(room);
       const you: Side = room.p1?.userId === body.user.userId ? "p1" : "p2";
-      return NextResponse.json({ ok: true, roomId, you, players: { p1: room.p1, p2: room.p2 }, state: room.state });
+      const ms = Date.now() - t0;
+      console.log(`[api/game][${reqId}] joinRoom ${roomId} as ${you} in ${ms}ms`);
+      return NextResponse.json({ ok: true, reqId, roomId, you, players: { p1: room.p1, p2: room.p2 }, state: room.state });
     }
 
     if (body.action === "leave") {
@@ -403,27 +437,27 @@ export async function POST(req: Request) {
       if (room.p1?.userId === body.userId) { room.p1 = null; if (isLobby(room.state)) room.state.ready.p1 = false; }
       if (room.p2?.userId === body.userId) { room.p2 = null; if (isLobby(room.state)) room.state.ready.p2 = false; }
       await saveRoom(room);
-      return NextResponse.json({ ok: true });
+      return NextResponse.json({ ok: true, reqId });
     }
 
     if (body.action === "players") {
       const room = await loadRoom(body.roomId);
-      return NextResponse.json({ ok: true, players: { p1: room.p1, p2: room.p2 } });
+      return NextResponse.json({ ok: true, reqId, players: { p1: room.p1, p2: room.p2 } });
     }
 
     if (body.action === "state") {
       const room = await loadRoom(body.roomId);
-      return NextResponse.json({ ok: true, state: room.state, players: { p1: room.p1, p2: room.p2 } });
+      return NextResponse.json({ ok: true, reqId, state: room.state, players: { p1: room.p1, p2: room.p2 } });
     }
 
     if (body.action === "ready") {
       const room = await loadRoom(body.roomId);
       if (!isLobby(room.state)) {
-        return NextResponse.json({ ok: true, full: true, state: room.state });
+        return NextResponse.json({ ok: true, reqId, full: true, state: room.state });
       }
       const side: Side | undefined =
         body.side ?? (room.p1?.userId ? "p2" : "p1");
-      if (!side) return NextResponse.json({ ok: false, error: "SIDE_REQUIRED" }, { status: 400 });
+      if (!side) return NextResponse.json({ ok: false, reqId, error: "SIDE_REQUIRED" }, { status: 400 });
 
       room.state.ready[side] = true;
 
@@ -434,6 +468,7 @@ export async function POST(req: Request) {
       const full = room.state.phase === "play";
       return NextResponse.json({
         ok: true,
+        reqId,
         full,
         state: room.state,
         patch: full ? undefined : { ready: (room.state as LobbyState).ready },
@@ -443,15 +478,17 @@ export async function POST(req: Request) {
     if (body.action === "action") {
       const room = await loadRoom(body.roomId);
       const res = applyAction(room.state, body.side, body.payload);
-      if (!res.ok) return NextResponse.json(res, { status: 400 });
+      if (!res.ok) return NextResponse.json({ ...res, reqId }, { status: 400 });
       if (res.patch && room.state.phase === "play") Object.assign(room.state, res.patch);
       await saveRoom(room);
-      return NextResponse.json({ ok: true, patch: res.patch ?? null, winner: res.winner ?? null });
+      return NextResponse.json({ ok: true, reqId, patch: res.patch ?? null, winner: res.winner ?? null });
     }
 
-    return NextResponse.json({ ok: false, error: "UNKNOWN_ACTION" }, { status: 400 });
-  } catch (e) {
+    return NextResponse.json({ ok: false, reqId, error: "UNKNOWN_ACTION" }, { status: 400 });
+  } catch (e: any) {
+    const ms = Date.now() - t0;
+    console.error(`[api/game][${reqId}] ERROR after ${ms}ms:`, e?.stack || e?.message || e);
     const msg = e instanceof Error ? e.message : "SERVER_ERROR";
-    return NextResponse.json({ ok: false, error: msg }, { status: 500 });
+    return NextResponse.json({ ok: false, reqId, error: msg }, { status: 500 });
   }
 }
