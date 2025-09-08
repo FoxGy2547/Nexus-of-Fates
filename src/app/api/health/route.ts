@@ -31,3 +31,4 @@ export async function GET(): Promise<Response> {
     return NextResponse.json({ ok: false, error: "SERVER_ERROR" }, { status: 500 });
   }
 }
+//test
