@@ -51,8 +51,9 @@ type Room = {
   p1?: PlayerInfo | null;
   p2?: PlayerInfo | null;
   state: RoomState;
-  lastSeatByUser?: Record<string, Side>; // map userId -> seat ล่าสุด (สำหรับ reconnect)
-  __ts?: number; // last touched (สำหรับ GC)
+  /** จำเก้าอี้ล่าสุดของ user เพื่อให้ reconnect กลับที่เดิม */
+  lastSeatByUser?: Record<string, Side>;
+  __ts?: number;
 };
 
 type Body =
@@ -150,7 +151,7 @@ if (!Object.keys(CARD_STATS).length) {
   globalThis.__NOF_CARD_STATS__ = CARD_STATS;
 }
 
-/* ===================== helpers ===================== */
+/* ===================== Room helpers ===================== */
 function newLobby(seed: string): LobbyState {
   return { phase: "lobby", ready: { p1: false, p2: false }, rngSeed: seed, lastAction: null };
 }
@@ -161,22 +162,24 @@ function createRoom(roomId?: string) {
   rooms.set(id, room);
   return { id, room };
 }
-function getRoom(roomId: string) { return rooms.get(roomId.toUpperCase()) ?? null; }
-function isLobby(s: RoomState): s is LobbyState { return s.phase === "lobby"; }
-function isPlay(s: RoomState): s is BattleState { return s.phase === "play"; }
+function getRoom(roomId: string) { return rooms.get((roomId || "").toUpperCase()) ?? null; }
+function isLobby(st: RoomState): st is LobbyState { return st.phase === "lobby"; }
+function isPlay(st: RoomState): st is BattleState { return st.phase === "play"; }
 
+/** ปรับความถูกต้องของ room โดยไม่ “ย้อนกลับ lobby” */
 function sanitize(room: Room) {
   if (!room.state) room.state = newLobby(room.seed);
   if (isPlay(room.state)) {
     if (room.p1 && !room.p1.userId) room.p1 = null;
     if (room.p2 && !room.p2.userId) room.p2 = null;
-    return; // ห้ามย้อน lobby
+    return;
   }
   if (room.p1?.userId && room.p2?.userId && room.p1.userId === room.p2.userId) {
     room.p2 = null; room.state.ready.p2 = false;
   }
 }
 
+/** ผู้สร้างห้อง = p1 เสมอ */
 function forceSitP1(room: Room, user: PlayerInfo) {
   sanitize(room);
   room.p1 = { ...user };
@@ -200,14 +203,23 @@ function startPlayFromLobby(lobby: LobbyState): BattleState {
     phase: "play",
     rngSeed: seed,
     lastAction: null,
-    phaseNo: 1, phaseStarter: "p1", phaseEnded: { p1: false, p2: false },
+
+    phaseNo: 1,
+    phaseStarter: "p1",
+    phaseEnded: { p1: false, p2: false },
+
     turn: "p1",
+
     hero: { p1: 30, p2: 30 },
+
     deck: { p1: shuffle(others, `${seed}:deck:p1`), p2: shuffle(others, `${seed}:deck:p2`) },
     hand: { p1: [], p2: [] },
+
     board: { p1: pick3("chars:p1").map(mkUnit), p2: pick3("chars:p2").map(mkUnit) },
     discard: { p1: [], p2: [] },
+
     dice: { p1: emptyDice(), p2: emptyDice() },
+
     playedCount: { p1: 0, p2: 0 },
     temp: { p1: { plusDmg: 0, shieldNext: 0 }, p2: { plusDmg: 0, shieldNext: 0 } },
   };
@@ -216,37 +228,59 @@ function startPlayFromLobby(lobby: LobbyState): BattleState {
   st.dice.p2 = rollDice(`${seed}:phase:1:p2`, 10);
   st.hand.p1.push(...st.deck.p1.splice(0, 4));
   st.hand.p2.push(...st.deck.p2.splice(0, 4));
+
   return st;
 }
 function startTurn(st: BattleState, side: Side) {
-  st.temp[side] = { plusDmg: 0, shieldNext: 0 }; st.playedCount[side] = 0;
+  st.temp[side] = { plusDmg: 0, shieldNext: 0 };
+  st.playedCount[side] = 0;
   st.hand[side].push(...st.deck[side].splice(0, 2));
 }
 function endTurnAndPass(st: BattleState) {
-  const next: Side = st.turn === "p1" ? "p2" : "p1"; st.turn = next; startTurn(st, next);
+  const next: Side = st.turn === "p1" ? "p2" : "p1";
+  st.turn = next;
+  startTurn(st, next);
 }
 
 /* ===================== Basic actions ===================== */
 function doPlayCard(st: BattleState, side: Side, index: number) {
   const hand = st.hand[side];
   if (index < 0 || index >= hand.length) return { ok: false, error: "Invalid hand index" } as const;
-  const code = hand[index]; const cs = CARD_STATS[code]; if (!cs) return { ok: false, error: "Unknown card" } as const;
+  const code = hand[index];
+  const cs = CARD_STATS[code];
+  if (!cs) return { ok: false, error: "Unknown card" } as const;
+
   const need = cs.cost ?? 0;
   if ((st.dice[side][cs.element] ?? 0) < need) return { ok: false, error: "Not enough dice" } as const;
-  st.dice[side][cs.element] -= need; hand.splice(index, 1);
+
+  st.dice[side][cs.element] -= need;
+  hand.splice(index, 1);
+
   if (cs.atk > 0 && cs.hp > 0) {
-    const hp = cs.hp + st.temp[side].shieldNext; st.temp[side].shieldNext = 0;
+    const hp = cs.hp + st.temp[side].shieldNext;
+    st.temp[side].shieldNext = 0;
     st.board[side].push({ code, atk: cs.atk, hp, element: cs.element });
-  } else { st.temp[side].plusDmg += 1; }
-  st.playedCount[side] += 1; st.lastAction = { kind: "playCard", side, code };
+  } else {
+    st.temp[side].plusDmg += 1;
+  }
+
+  st.playedCount[side] += 1;
+  st.lastAction = { kind: "playCard", side, code };
   return { ok: true, patch: { hand: st.hand, board: st.board, dice: st.dice, lastAction: st.lastAction } } as const;
 }
 function doAttack(st: BattleState, side: Side, idx: number) {
-  const me = st.board[side]; if (idx < 0 || idx >= me.length) return { ok: false, error: "Invalid board index" } as const;
-  const unit = me[idx]; const foeSide: Side = side === "p1" ? "p2" : "p1"; const foe = st.board[foeSide];
+  const me = st.board[side];
+  if (idx < 0 || idx >= me.length) return { ok: false, error: "Invalid board index" } as const;
+  const unit = me[idx];
+  const foeSide: Side = side === "p1" ? "p2" : "p1";
+  const foe = st.board[foeSide];
+
   const dmg = unit.atk + st.temp[side].plusDmg + (unit.code === "BLAZE_KNIGHT" ? 1 : 0);
+
   if (foe.length > 0) {
-    const t = foe[0]; t.hp -= dmg; unit.hp -= t.atk;
+    const t = foe[0];
+    t.hp -= dmg;
+    unit.hp -= t.atk;
     st.lastAction = { kind: "attackUnit", side, code: unit.code, target: t.code, dmg, coun: t.atk };
     if (t.hp <= 0) { foe.shift(); st.discard[foeSide].push(t.code); }
     if (unit.hp <= 0) { me.splice(idx, 1); st.discard[side].push(unit.code); }
@@ -260,12 +294,18 @@ function doAttack(st: BattleState, side: Side, idx: number) {
 }
 function doEndPhase(st: BattleState, side: Side) {
   if (st.phaseEnded[side]) return { ok: true } as const;
-  st.phaseEnded[side] = true; st.lastAction = { kind: "endPhase", side, phaseNo: st.phaseNo };
+  st.phaseEnded[side] = true;
+  st.lastAction = { kind: "endPhase", side, phaseNo: st.phaseNo };
+
   if (st.phaseEnded.p1 && st.phaseEnded.p2) {
-    st.phaseNo += 1; st.phaseStarter = side; st.turn = st.phaseStarter; st.phaseEnded = { p1: false, p2: false };
+    st.phaseNo += 1;
+    st.phaseStarter = side;
+    st.turn = st.phaseStarter;
+    st.phaseEnded = { p1: false, p2: false };
     st.dice.p1 = rollDice(`${st.rngSeed}:phase:${st.phaseNo}:p1`, 10);
     st.dice.p2 = rollDice(`${st.rngSeed}:phase:${st.phaseNo}:p2`, 10);
-    st.hand.p1.push(...st.deck.p1.splice(0, 4)); st.hand.p2.push(...st.deck.p2.splice(0, 4));
+    st.hand.p1.push(...st.deck.p1.splice(0, 4));
+    st.hand.p2.push(...st.deck.p2.splice(0, 4));
   }
   return { ok: true, patch: { lastAction: st.lastAction, dice: st.dice, hand: st.hand, turn: st.turn } } as const;
 }
@@ -317,7 +357,7 @@ export async function POST(req: Request) {
     if (body.action === "joinRoom") {
       const id = (body.roomId || "").toUpperCase();
       let room = getRoom(id);
-      if (!room) { ({ room } = createRoom(id)); } // สร้างครั้งแรกเท่านั้น
+      if (!room) ({ room } = createRoom(id)); // สร้างครั้งแรกเท่านั้น
       sanitize(room);
 
       const youId = body.user.userId;
@@ -351,6 +391,7 @@ export async function POST(req: Request) {
     if (body.action === "leave") {
       const r = getRoom(body.roomId);
       if (!r) return NextResponse.json({ ok: true });
+
       if (isPlay(r.state)) {
         if (r.p1?.userId === body.userId) r.p1 = null;
         if (r.p2?.userId === body.userId) r.p2 = null;
