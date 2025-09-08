@@ -1,13 +1,12 @@
 import { NextResponse } from "next/server";
-import { createPool } from "@/lib/db";
 import type { Pool, RowDataPacket } from "mysql2/promise";
+import { getPool } from "@/lib/db";
 
-/* Next.js route config */
+/** Next.js route config */
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/* ========= Types ========= */
-
+/* ===================== Types ===================== */
 type Element =
   | "Pyro"
   | "Hydro"
@@ -19,24 +18,9 @@ type Element =
   | "Imaginary"
   | "Neutral";
 
-export type CardRow = {
-  code: string;
-  name: string;
-  element: Element | "Neutral";
-  attack: number;
-  hp: number;
-  ability: string;
-  cost: number;
-  type: string | null;
-  rarity: string | null;
-  role: string | null;
-  image: string | null;
-};
-
 type CardRowDB = RowDataPacket & {
-  id: number;
   code: string;
-  name: string;
+  name: string | null;
   element: Element | null;
   attack: number | null;
   hp: number | null;
@@ -45,59 +29,66 @@ type CardRowDB = RowDataPacket & {
   type: string | null;
   rarity: string | null;
   role: string | null;
-  image: string | null;
 };
 
-type CardsMap = Record<string, CardRow>;
+export type CardRow = {
+  code: string;
+  name: string;
+  element: Element;
+  attack: number;
+  hp: number;
+  ability: string;
+  cost: number;
+  type: string | null;
+  rarity?: string | null;
+  role?: string | null;
+  /** path รูป (ใช้ชื่อจากคอลัมน์ name) */
+  image: string;
+};
 
-/* ========= Connection pool (cache) ========= */
-
-let poolPromise: Promise<Pool> | null = null;
-function getPool(): Promise<Pool> {
-  if (!poolPromise) poolPromise = createPool();
-  return poolPromise!;
-}
-
-/* ========= In-memory cache ========= */
-
-const CACHE_TTL_MS = 60_000; // 60s
-let cardsCache: { at: number; map: CardsMap } | null = null;
+/* ===================== In-memory cache ===================== */
+let cacheByCode: Record<string, CardRow> = {};
+let cacheLoadedAt = 0;
+const TTL_MS = 60_000; // 60s
 
 function now(): number {
   return Date.now();
 }
 
+/* แปลงค่า DB → รูปแบบที่ส่งให้ client */
 function normalizeRow(r: CardRowDB): CardRow {
+  const safeName = (r.name ?? r.code).trim();
   return {
     code: String(r.code),
-    name: String(r.name ?? r.code ?? ""),
-    element: (r.element ?? "Neutral") as Element | "Neutral",
+    name: safeName,
+    element: (r.element ?? "Neutral") as Element,
     attack: Number(r.attack ?? 0),
     hp: Number(r.hp ?? 0),
-    ability: String(r.ability ?? ""),
+    ability: r.ability ?? "",
     cost: Number(r.cost ?? 0),
     type: r.type ?? null,
     rarity: r.rarity ?? null,
     role: r.role ?? null,
-    image: r.image ?? null,
+    image: `/cards/${safeName}.png`, // ใช้ชื่อจากคอลัมน์ name ตามที่ต้องการ
   };
 }
 
-/** โหลดการ์ดทั้งหมดจาก DB เป็น map[code] */
-async function loadAllFromDB(): Promise<CardsMap> {
-  const pool = await getPool();
+/** โหลดการ์ดทั้งหมดจากฐานข้อมูล (ใส่ cache) */
+async function loadAllFromDB(): Promise<Record<string, CardRow>> {
+  const pool: Pool = await getPool();
 
   const sql = `
     SELECT
-      id, code, name, element,
-      attack, hp, ability, cost, type, rarity, role, image
+      code, name, element,
+      attack, hp, ability, cost,
+      type, rarity, role
     FROM cards
     ORDER BY id ASC
   `;
 
-  const [rows] = await pool.execute<CardRowDB[]>(sql);
+  const [rows] = await pool.query<CardRowDB[]>(sql);
 
-  const map: CardsMap = {};
+  const map: Record<string, CardRow> = {};
   for (const r of rows ?? []) {
     const code = String(r.code);
     map[code] = normalizeRow(r);
@@ -105,81 +96,65 @@ async function loadAllFromDB(): Promise<CardsMap> {
   return map;
 }
 
-/** ให้แหล่งข้อมูลการ์ด (โหลด DB เมื่อ cache หมดอายุ) */
-async function getCardsMap(): Promise<CardsMap> {
-  const fresh = cardsCache && now() - cardsCache.at < CACHE_TTL_MS;
-  if (fresh && cardsCache) return cardsCache.map;
+/** ดึงข้อมูลจาก cache (ถ้าเก่าเกิน TTL จะโหลดใหม่) */
+async function ensureCache(): Promise<void> {
+  const fresh = now() - cacheLoadedAt < TTL_MS && Object.keys(cacheByCode).length > 0;
+  if (fresh) return;
 
   try {
-    const map = await loadAllFromDB();
-    cardsCache = { at: now(), map };
-    return map;
-  } catch {
-    // DB ล่ม → ถ้ามี cache เดิมให้ใช้ไปก่อน
-    if (cardsCache) return cardsCache.map;
-    // ไม่มี cache เลย → คืนว่าง
-    return {};
+    cacheByCode = await loadAllFromDB();
+    cacheLoadedAt = now();
+  } catch (err) {
+    // ถ้าดึง DB ไม่ได้ ให้คง cache เดิม (หรือว่าง) แต่ไม่ throw เพื่อไม่ให้เว็บพัง
+    console.warn("[api/cards] loadAllCards failed:", err);
   }
 }
 
-/* ========= GET handler =========
-   - /api/cards                -> การ์ดทั้งหมด
-   - /api/cards?codes=A,B,C    -> เฉพาะ code ที่ขอ (คั่น ,)
-*/
-export async function GET(req: Request) {
-  try {
-    const url = new URL(req.url);
-    const codesParam = url.searchParams.get("codes");
+/** เลือกเฉพาะรหัสที่ต้องการ (ถ้าไม่ส่ง codes → ส่งทั้งหมด) */
+function pickByCodes(codesCSV: string | null): CardRow[] {
+  if (!codesCSV) return Object.values(cacheByCode);
 
-    const map = await getCardsMap();
-
-    let cards: CardRow[];
-
-    if (codesParam && codesParam.trim().length > 0) {
-      const wanted = codesParam
+  const wanted = Array.from(
+    new Set(
+      codesCSV
         .split(",")
         .map((s) => s.trim())
-        .filter((s) => s.length > 0);
+        .filter((s) => s.length > 0)
+    )
+  );
 
-      cards = wanted.map((c) => {
-        const found = map[c];
-        // ถ้าไม่พบใน DB ให้ทำ fallback card เปล่า ๆ ด้วยชื่ออ่านง่าย
-        if (!found) {
-          const pretty = c.replaceAll("_", " ");
-          return {
-            code: c,
-            name: pretty,
-            element: "Neutral",
-            attack: 0,
-            hp: 0,
-            ability: "",
-            cost: 0,
-            type: null,
-            rarity: null,
-            role: null,
-            image: null,
-          } satisfies CardRow;
-        }
-        return found;
-      });
-    } else {
-      cards = Object.values(map);
-    }
+  const out: CardRow[] = [];
+  for (const c of wanted) {
+    const row = cacheByCode[c];
+    if (row) out.push(row);
+  }
+  return out;
+}
+
+/* ===================== GET Handler ===================== */
+export async function GET(req: Request) {
+  try {
+    await ensureCache();
+
+    const url = new URL(req.url);
+    const codesCSV = url.searchParams.get("codes");
+
+    const cards = pickByCodes(codesCSV);
 
     return NextResponse.json(
       {
         ok: true,
         count: cards.length,
         cards,
-        cacheAgeMs: cardsCache ? now() - cardsCache.at : null,
       },
       { status: 200 }
     );
-  } catch (e) {
-    // ถ้าเกิด error หนัก ๆ ก็คืน minimal payload เพื่อไม่ให้หน้าเพลย์พัง
+  } catch (err) {
+    // ถ้าเกิดเหตุการณ์ไม่คาดฝัน ให้ตอบกลับ ok:false แต่ไม่ปล่อย throw
+    console.warn("[api/cards] GET error:", err);
     return NextResponse.json(
-      { ok: false, error: "CARDS_FETCH_FAILED", cards: [] as CardRow[] },
-      { status: 503 }
+      { ok: false, cards: [] as CardRow[] },
+      { status: 200 }
     );
   }
 }

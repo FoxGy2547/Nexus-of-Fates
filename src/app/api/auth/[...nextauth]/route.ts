@@ -75,7 +75,7 @@ const authOptions: NextAuthOptions = {
 
       // บันทึก/อัปเดตผู้ใช้ในฐานข้อมูล (ไม่ใช้ any)
       try {
-        const pool = await getPool(); // pool จะมี type เป็น Pool อัตโนมัติ
+        const pool: Pool = await getPool();
 
         await pool.query(
           `INSERT INTO users (discord_id, email, username, avatar)
