@@ -1,28 +1,42 @@
-import { createPool as mysqlCreatePool, type Pool, type PoolOptions } from "mysql2/promise";
+import mysql, { Pool } from "mysql2/promise";
 
-/** กันสร้าง Pool ซ้ำตอน hot-reload */
-declare global {
-  // eslint-disable-next-line no-var
-  var __MYSQL_POOL__: Pool | undefined;
+let _pool: Pool | null = null;
+
+export async function createPool(): Promise<Pool> {
+  if (_pool) return _pool;
+
+  const {
+    DB_HOST,
+    DB_PORT,
+    DB_USER,
+    DB_PASSWORD,
+    DB_NAME,
+    DATABASE_URL,
+  } = process.env;
+
+  if (DATABASE_URL) {
+    _pool = mysql.createPool(DATABASE_URL);
+    return _pool;
+  }
+
+  if (!DB_HOST || !DB_USER || !DB_NAME) {
+    throw new Error("Database config is missing (env)");
+  }
+
+  _pool = mysql.createPool({
+    host: DB_HOST,
+    port: DB_PORT ? Number(DB_PORT) : 3306,
+    user: DB_USER,
+    password: DB_PASSWORD ?? "",
+    database: DB_NAME,
+    connectionLimit: 5,
+    waitForConnections: true,
+    queueLimit: 0,
+  });
+
+  return _pool;
 }
 
-export function getPool(): Pool {
-  if (global.__MYSQL_POOL__) return global.__MYSQL_POOL__;
-
-  const opts: PoolOptions = {
-    host: process.env.DB_HOST!,
-    user: process.env.DB_USER!,
-    password: process.env.DB_PASS!,
-    database: process.env.DB_NAME!,
-    waitForConnections: true,
-    connectionLimit: Number(process.env.MYSQL_CONN_LIMIT ?? 5),
-    queueLimit: 0,
-    enableKeepAlive: true,
-    keepAliveInitialDelay: 10_000,
-    multipleStatements: false,
-  };
-
-  const pool = mysqlCreatePool(opts);
-  global.__MYSQL_POOL__ = pool;
-  return pool;
+export async function getPool(): Promise<Pool> {
+  return createPool();
 }

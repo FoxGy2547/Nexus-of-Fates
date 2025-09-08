@@ -12,9 +12,7 @@ type Element =
   | "Geo" | "Anemo" | "Quantum" | "Imaginary" | "Neutral";
 
 type DicePool = Record<Element, number>;
-
 type PlayerInfo = { userId: string; name?: string | null; avatar?: string | null };
-
 type Unit = { code: string; atk: number; hp: number; element: Element };
 
 type LobbyState = {
@@ -75,9 +73,7 @@ type Body =
     };
 
 /* ===================== In-memory store ===================== */
-// eslint-disable-next-line no-var
 declare global { var __NOF_ROOMS__: Map<string, Room> | undefined; }
-// eslint-disable-next-line no-var
 declare global { var __NOF_CARD_STATS__: Record<string, { atk:number; hp:number; element:Element; ability?:string; cost:number }> | undefined; }
 
 const rooms = globalThis.__NOF_ROOMS__ ?? new Map<string, Room>();
@@ -128,7 +124,7 @@ function rollDice(seed: string, n = 10): DicePool {
   return d;
 }
 
-/* ===================== Cards fallback (ถ้าไม่ได้โหลดจาก DB) ===================== */
+/* ===================== Cards fallback (ไม่มี DB ก็เล่นได้) ===================== */
 if (!Object.keys(CARD_STATS).length) {
   const f = (e: Element, atk: number, hp: number, cost: number) => ({ element: e, atk, hp, cost });
   CARD_STATS = {
@@ -162,22 +158,19 @@ function getOrCreateRoom(roomId?: string) {
 }
 function isLobby(st: RoomState): st is LobbyState { return st.phase === "lobby"; }
 
-/** เคลียร์ข้อมูลเพี้ยน */
 function sanitize(room: Room) {
   if (!room.state || !("phase" in room.state)) {
     room.state = newLobby(room.seed);
   }
   if (room.p1 && !room.p1.userId) room.p1 = undefined;
   if (room.p2 && !room.p2.userId) room.p2 = undefined;
-
-  // ถ้าคนเดียวกันนั่งทั้งสองฝั่ง → ล้าง p2
   if (room.p1?.userId && room.p2?.userId && room.p1.userId === room.p2.userId) {
     room.p2 = undefined;
     if (isLobby(room.state)) room.state.ready.p2 = false;
   }
 }
 
-/** บังคับล็อกผู้สร้าง = p1 (กันหลุดเป็น p2) */
+/** ผู้สร้างห้อง = p1 เสมอ */
 function forceSitP1(room: Room, user: PlayerInfo) {
   sanitize(room);
   room.p1 = { ...user };
@@ -185,16 +178,6 @@ function forceSitP1(room: Room, user: PlayerInfo) {
     room.p2 = undefined;
     if (isLobby(room.state)) room.state.ready.p2 = false;
   }
-}
-
-/** ให้ผู้เล่นเข้าไปนั่ง p1/p2 อย่างปลอดภัย */
-function sitOrReuse(room: Room, user: PlayerInfo): Side | null {
-  sanitize(room);
-  if (room.p1?.userId === user.userId) { room.p1 = user; return "p1"; }
-  if (room.p2?.userId === user.userId) { room.p2 = user; return "p2"; }
-  if (!room.p1) { room.p1 = user; return "p1"; }
-  if (!room.p2) { room.p2 = user; return "p2"; }
-  return null;
 }
 
 /* ===================== Start / Phase / Turn ===================== */
@@ -237,7 +220,6 @@ function startPlayFromLobby(lobby: LobbyState): BattleState {
     temp: { p1: { plusDmg: 0, shieldNext: 0 }, p2: { plusDmg: 0, shieldNext: 0 } },
   };
 
-  // เริ่ม Phase แรก: แจก dice 10, จั่วการ์ดอื่น 4 ใบต่อคน
   st.dice.p1 = rollDice(`${seed}:phase:1:p1`, 10);
   st.dice.p2 = rollDice(`${seed}:phase:1:p2`, 10);
   st.hand.p1.push(...st.deck.p1.splice(0, 4));
@@ -328,19 +310,27 @@ function doEndPhase(st: BattleState, side: Side) {
   return { ok: true, patch: { lastAction: st.lastAction, dice: st.dice, hand: st.hand, turn: st.turn } } as const;
 }
 
-function applyAction(state: RoomState, side: Side, payload: any) {
-  if (state.phase !== "play") return { ok: false, error: "Game not started" } as const;
+/* ===== applyAction types ===== */
+type ApplyOk = { ok: true; patch?: Partial<BattleState> | null; winner?: Side | null };
+type ApplyErr = { ok: false; error: string };
+type ApplyRes = ApplyOk | ApplyErr;
+
+function applyAction(state: RoomState, side: Side, payload: unknown): ApplyRes {
+  if (state.phase !== "play") return { ok: false, error: "Game not started" };
   const st = state as BattleState;
 
-  if (payload?.kind === "endPhase") return doEndPhase(st, side);
+  if (typeof payload === "object" && payload !== null && (payload as Record<string, unknown>).kind === "endPhase") {
+    return doEndPhase(st, side);
+  }
 
-  if (st.turn !== side) return { ok: false, error: "Not your turn" } as const;
+  if (st.turn !== side) return { ok: false, error: "Not your turn" };
 
-  if (payload?.kind === "playCard") return doPlayCard(st, side, Number(payload.index ?? -1));
-  if (payload?.kind === "attack") return doAttack(st, side, Number(payload.index ?? -1));
-  if (payload?.kind === "endTurn") { endTurnAndPass(st); st.lastAction = { kind: "endTurn" }; return { ok: true, patch: { turn: st.turn, lastAction: st.lastAction, hand: st.hand } } as const; }
+  const p = payload as Record<string, unknown>;
+  if (p.kind === "playCard") return doPlayCard(st, side, Number(p.index ?? -1));
+  if (p.kind === "attack") return doAttack(st, side, Number(p.index ?? -1));
+  if (p.kind === "endTurn") { endTurnAndPass(st); st.lastAction = { kind: "endTurn" }; return { ok: true, patch: { turn: st.turn, lastAction: st.lastAction, hand: st.hand } }; }
 
-  return { ok: true, patch: { lastAction: payload } } as const;
+  return { ok: true, patch: { lastAction: payload as unknown } };
 }
 
 /* ===================== Route handlers ===================== */
@@ -348,16 +338,21 @@ export function GET() {
   return NextResponse.json({ ok: true, route: "game" });
 }
 
+/** type guard: ต้องมี action เป็น string */
+function hasActionField(v: unknown): v is { action: Body["action"] } {
+  return typeof v === "object" && v !== null && typeof (v as Record<string, unknown>).action === "string";
+}
+
 export async function POST(req: Request) {
   try {
-    let body: Body | null = null;
-    try { body = (await req.json()) as Body; } catch {}
-    if (!body || typeof (body as any).action !== "string")
+    const raw = await req.json().catch(() => null);
+    if (!hasActionField(raw)) {
       return NextResponse.json({ ok: false, error: "BAD_BODY" }, { status: 400 });
+    }
+    const body = raw as Body;
 
     if (body.action === "createRoom") {
       const { id, room } = getOrCreateRoom(body.roomId);
-      // ล็อกผู้สร้าง = p1 เสมอ และห้ามนั่งสองฝั่ง
       forceSitP1(room, body.user);
       rooms.set(id, room);
       return NextResponse.json({
@@ -373,7 +368,6 @@ export async function POST(req: Request) {
       const { id, room } = getOrCreateRoom(body.roomId);
       sanitize(room);
 
-      // คนเดิมกลับเข้าห้อง → คืนที่นั่งเดิม
       if (room.p1?.userId === body.user.userId) {
         room.p1 = body.user;
         rooms.set(id, room);
@@ -385,7 +379,6 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: true, roomId: id, you: "p2", players: { p1: room.p1 ?? null, p2: room.p2 ?? null }, state: room.state });
       }
 
-      // ถ้าที่นั่งว่าง → นั่ง p2 ก่อน, ถ้า p2 ไม่ว่างค่อยลอง p1
       if (!room.p2) {
         room.p2 = body.user;
         rooms.set(id, room);
@@ -397,7 +390,6 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: true, roomId: id, you: "p1", players: { p1: room.p1 ?? null, p2: room.p2 ?? null }, state: room.state });
       }
 
-      // เต็มจริง ๆ
       return NextResponse.json({ ok: false, error: "ROOM_FULL" }, { status: 400 });
     }
 
@@ -435,7 +427,6 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: true, full: true, state: room.state });
       }
 
-      // ระบุที่นั่งจาก userId
       const side: Side | undefined =
         body.side ??
         (room.p1?.userId === body.userId ? "p1" : room.p2?.userId === body.userId ? "p2" : undefined);
@@ -465,11 +456,11 @@ export async function POST(req: Request) {
       if (res.patch && r.state.phase === "play") Object.assign(r.state, res.patch);
       rooms.set(r.id, r);
 
-      return NextResponse.json({ ok: true, patch: (res as any).patch ?? null, winner: (res as any).winner ?? null });
+      return NextResponse.json({ ok: true, patch: res.patch ?? null, winner: res.winner ?? null });
     }
 
     return NextResponse.json({ ok: false, error: "UNKNOWN_ACTION" }, { status: 400 });
-  } catch (e: unknown) {
+  } catch (e) {
     const msg = e instanceof Error ? e.message : "SERVER_ERROR";
     return NextResponse.json({ ok: false, error: msg }, { status: 500 });
   }

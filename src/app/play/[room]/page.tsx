@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import { useGame } from "@/hooks/useGame";
 
-/* ===================== local view-model (จาก state เกม) ===================== */
+/* ===================== local view-model ===================== */
 type Side = "p1" | "p2";
 type DicePool = Record<string, number>;
 type UnitVM = { code: string; attack: number; hp: number; element: string };
@@ -24,7 +24,7 @@ type PlayersVM = {
   p2: { userId: string; name?: string | null; avatar?: string | null } | null;
 };
 
-/* ===================== meta จาก /api/cards ===================== */
+/* ===================== card meta ===================== */
 type Element =
   | "Pyro" | "Hydro" | "Cryo" | "Electro"
   | "Geo" | "Anemo" | "Quantum" | "Imaginary" | "Neutral";
@@ -55,8 +55,6 @@ const ELEMENT_ICON: Record<string, string> = {
   Imaginary: "/dice/imaginary.png",
   Neutral: "/dice/neutral.png",
 };
-
-/* แผนที่รูปการ์ด (ชื่อไฟล์ตรงกับที่มีอยู่) */
 const CARD_IMG: Record<string, string> = {
   BLAZE_KNIGHT: "/cards/Blaze Knight.png",
   CINDER_SCOUT: "/cards/Cinder Scout.png",
@@ -74,7 +72,7 @@ const CARD_IMG: Record<string, string> = {
   BLAZING_SIGIL: "/cards/Blazing Sigil.png",
 };
 
-/* ===================== ชิ้น UI เล็ก ๆ ===================== */
+/* ===== UI bits ===== */
 function Pill({ children }: { children: React.ReactNode }) {
   return <span className="px-2 py-0.5 rounded bg-neutral-800 text-xs">{children}</span>;
 }
@@ -99,6 +97,7 @@ function DiceTray({ dice }: { dice: DicePool }) {
     });
     return arr.sort((a, b) => a.el.localeCompare(b.el));
   }, [dice]);
+
   if (!diceArray.length) {
     return (
       <div className="w-full rounded-lg border border-white/10 bg-black/30 grid place-items-center text-sm opacity-70 h-28">
@@ -162,17 +161,14 @@ function FieldHeader({
 }
 
 /* ===================== Frame renderer ===================== */
-/** อัตราส่วนเฟรม 942×1389 */
 const FRAME_W = 188;
 const FRAME_H = Math.round(FRAME_W * (1389 / 942));
 const FRAME_SRC = "/card_frame.png";
-
-/** พิกัดอิงเฟรม — ตำแหน่งกึ่งกลาง (%) + ขนาดวงกลม (%) */
 const POS = {
-  el:   { cx: 83.4, cy: 12.0, d: 18.6 }, // ธาตุ ขวาบน
-  atk:  { cx: 13.5, cy: 89.0, d: 19.4 }, // ATK ล่างซ้าย
-  hp:   { cx: 85.8, cy: 89.0, d: 19.4 }, // HP ล่างขวา
-  name: { cx: 50.0, cy: 72.0, w: 73.0, h: 8.2 }, // ชื่อกลาง
+  el:   { cx: 83.4, cy: 12.0, d: 18.6 },
+  atk:  { cx: 13.5, cy: 89.0, d: 19.4 },
+  hp:   { cx: 85.8, cy: 89.0, d: 19.4 },
+  name: { cx: 50.0, cy: 72.0, w: 73.0, h: 8.2 },
 };
 const textShadow = "0 1px 2px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,0.7)";
 
@@ -224,7 +220,7 @@ function NameOverlay({
   );
 }
 
-/** การ์ดตัวละครที่มีเฟรม + overlay ข้อมูลจาก meta/u */
+/* ===== Character / Simple cards ===== */
 function CharacterCardFramed({ u, meta }: { u: UnitVM; meta?: CardMeta }) {
   const name = meta?.name ?? u.code.replaceAll("_", " ");
   const atk = (meta?.attack ?? u.attack) ?? 0;
@@ -266,13 +262,7 @@ function CharacterCardFramed({ u, meta }: { u: UnitVM; meta?: CardMeta }) {
       <NameOverlay cx={POS.name.cx} cy={POS.name.cy} wPct={POS.name.w} hPct={POS.name.h}>
         <span
           className="font-medium"
-          style={{
-            color: "#000",
-            fontSize: "clamp(10px,1vw,12px)",
-            lineHeight: 1.05,
-            letterSpacing: ".02em",
-            textShadow: "none",
-          }}
+          style={{ color: "#000", fontSize: "clamp(10px,1vw,12px)", lineHeight: 1.05, letterSpacing: ".02em" }}
         >
           {name}
         </span>
@@ -280,8 +270,6 @@ function CharacterCardFramed({ u, meta }: { u: UnitVM; meta?: CardMeta }) {
     </div>
   );
 }
-
-/** การ์ดที่ไม่ใช่ตัวละคร (ไม่ใส่เฟรม) */
 function SimpleCard({ code, meta }: { code: string; meta?: CardMeta }) {
   const name = meta?.name ?? code.replaceAll("_", " ");
   return (
@@ -291,74 +279,52 @@ function SimpleCard({ code, meta }: { code: string; meta?: CardMeta }) {
   );
 }
 
-/* ===================== Fallback meta hook ===================== */
+/* ===================== Meta loader hook ===================== */
 function useCardMetaMap(allCodes: string[]) {
   const [meta, setMeta] = useState<CardMetaMap>({});
 
+  const wanted = useMemo(() => Array.from(new Set(allCodes)), [allCodes]);
+
   useEffect(() => {
-    if (!allCodes.length) return;
-    const wanted = Array.from(new Set(allCodes)); // unique list
+    if (!wanted.length) { setMeta({}); return; }
 
-    fetch(`/api/cards?codes=${encodeURIComponent(wanted.join(","))}`)
-      .then(async (r) => {
-        let data: unknown;
-        try { data = await r.json(); } catch { data = null; }
-
-        const asOk = (val: unknown): val is { ok: boolean; cards: CardMeta[] } =>
-          typeof val === "object" && val !== null && "ok" in (val as Record<string, unknown>);
-
+    (async () => {
+      try {
+        const res = await fetch(`/api/cards?codes=${encodeURIComponent(wanted.join(","))}`, { cache: "no-store" });
+        const data: unknown = await res.json().catch(() => null);
+        const okShape = (v: unknown): v is { ok: boolean; cards: CardMeta[] } =>
+          typeof v === "object" && v !== null && Array.isArray((v as Record<string, unknown>)["cards"]);
         const map: CardMetaMap = {};
-        if (asOk(data) && Array.isArray((data as { cards: unknown }).cards)) {
-          for (const c of (data as { cards: CardMeta[] }).cards) map[c.code] = c;
+        if (okShape(data)) {
+          for (const c of data.cards) map[c.code] = c;
         } else {
           for (const code of wanted) {
-            map[code] = {
-              code,
-              name: code.replaceAll("_", " "),
-              element: "Neutral",
-              attack: 0,
-              hp: 0,
-              ability: "",
-              cost: 0,
-              type: null,
-            };
+            map[code] = { code, name: code.replaceAll("_"," "), element: "Neutral", attack: 0, hp: 0, ability: "", cost: 0, type: null };
           }
         }
         setMeta(map);
-      })
-      .catch(() => {
+      } catch {
         const map: CardMetaMap = {};
         for (const code of wanted) {
-          map[code] = {
-            code,
-            name: code.replaceAll("_", " "),
-            element: "Neutral",
-            attack: 0,
-            hp: 0,
-            ability: "",
-            cost: 0,
-            type: null,
-          };
+          map[code] = { code, name: code.replaceAll("_"," "), element: "Neutral", attack: 0, hp: 0, ability: "", cost: 0, type: null };
         }
         setMeta(map);
-      });
-  }, [JSON.stringify(allCodes)]);
+      }
+    })();
+  }, [wanted]);
 
   return meta;
 }
 
-/* ===================== ช่วยตัดสินว่าเป็น “ตัวละคร” ===================== */
+/* ===================== helpers ===================== */
 function isCharacterCard(meta: CardMeta | undefined, u: UnitVM) {
   if ((meta?.type ?? "").toLowerCase() === "character") return true;
   const atk = (meta?.attack ?? u.attack) ?? 0;
   const hp  = (meta?.hp ?? u.hp) ?? 0;
   return atk > 0 || hp > 0;
 }
-
-/* ===================== การ์ด 1 ใบบนบอร์ด ===================== */
 function UnitCard({ u, meta }: { u: UnitVM; meta?: CardMeta }) {
   const character = isCharacterCard(meta, u);
-
   return (
     <div className="flex flex-col items-center">
       {character ? (
@@ -385,8 +351,6 @@ function EmptySlot() {
     </div>
   );
 }
-
-/** แถวบอร์ด 3 ช่อง กลางเสมอ */
 function BoardRow({ units, metaMap }: { units: UnitVM[]; metaMap: CardMetaMap }) {
   const slots = [0, 1, 2].map((i) => {
     const u = units[i];
@@ -410,7 +374,6 @@ export default function PlayRoomPage() {
   const opponentSide: Side = yourSide === "p1" ? "p2" : "p1";
   const yourHero = cs?.hero?.[yourSide] ?? 30;
 
-  // meta: รวมโค้ดที่อยู่บนบอร์ด + ในมือ ทั้งสองฝั่ง
   const codesForMeta = useMemo(() => {
     const b1 = (cs?.board?.p1 ?? []).map((u) => u.code);
     const b2 = (cs?.board?.p2 ?? []).map((u) => u.code);
@@ -427,7 +390,6 @@ export default function PlayRoomPage() {
         <div className="text-sm opacity-70">You are: {you || "-"}</div>
       </header>
 
-      {/* ===== LOBBY ===== */}
       {cs?.mode === "lobby" && (
         <section className="rounded-2xl border border-white/10 p-6 bg-black/20">
           <div className="flex items-center gap-4">
@@ -444,10 +406,8 @@ export default function PlayRoomPage() {
         </section>
       )}
 
-      {/* ===== PLAY ===== */}
       {cs?.mode === "play" && (
         <>
-          {/* ---------- OPPONENT FIELD ---------- */}
           <section className="rounded-3xl border border-white/10 p-5 bg-black/20">
             <FieldHeader
               tag={opponentSide.toUpperCase() as "P1" | "P2"}
@@ -460,7 +420,6 @@ export default function PlayRoomPage() {
             </div>
           </section>
 
-          {/* ---------- Controls ---------- */}
           <section className="flex items-center justify-between rounded-2xl border border-white/10 bg-black/10 p-4">
             <div className="font-semibold">
               {cs.turn === yourSide ? (
@@ -483,7 +442,6 @@ export default function PlayRoomPage() {
             </div>
           </section>
 
-          {/* ---------- YOUR FIELD ---------- */}
           <section className="rounded-3xl border border-white/10 p-5 bg-black/20">
             <FieldHeader
               tag={yourSide.toUpperCase() as "P1" | "P2"}
@@ -492,14 +450,11 @@ export default function PlayRoomPage() {
               right={<span className="text-xs opacity-70">Your Hero: {yourHero} HP</span>}
             />
 
-            {/* board เรา: กึ่งกลางเสมอ */}
             <div className="mt-4 flex justify-center">
               <BoardRow units={(cs.board?.[yourSide] ?? []).slice(0, 3)} metaMap={metaMap} />
             </div>
 
-            {/* Hand + Dice */}
             <div className="mt-6 grid grid-cols-12 gap-4">
-              {/* Hand */}
               <div className="col-span-12 md:col-span-8 rounded-xl border border-white/10 bg-neutral-900/40 p-4">
                 <div className="font-medium mb-2">Your Hand</div>
                 <div className="flex flex-wrap gap-3">
@@ -534,7 +489,6 @@ export default function PlayRoomPage() {
                 </div>
               </div>
 
-              {/* Dice */}
               <div className="col-span-12 md:col-span-4 rounded-xl border border-white/10 bg-neutral-900/40 p-4">
                 <div className="font-medium mb-2">Your Dice</div>
                 <DiceTray dice={cs.dice?.[yourSide] ?? {}} />

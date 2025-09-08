@@ -1,19 +1,28 @@
 import { NextResponse } from "next/server";
-import { getPool } from "@/lib/db";
-import type { RowDataPacket } from "mysql2";
+import { createPool } from "@/lib/db";
+import type { Pool, RowDataPacket } from "mysql2/promise";
 
+/* Next.js route config */
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/* ===== Types ===== */
+/* ========= Types ========= */
+
 type Element =
-  | "Pyro" | "Hydro" | "Cryo" | "Electro"
-  | "Geo" | "Anemo" | "Quantum" | "Imaginary" | "Neutral";
+  | "Pyro"
+  | "Hydro"
+  | "Cryo"
+  | "Electro"
+  | "Geo"
+  | "Anemo"
+  | "Quantum"
+  | "Imaginary"
+  | "Neutral";
 
 export type CardRow = {
   code: string;
   name: string;
-  element: Element;
+  element: Element | "Neutral";
   attack: number;
   hp: number;
   ability: string;
@@ -25,8 +34,9 @@ export type CardRow = {
 };
 
 type CardRowDB = RowDataPacket & {
+  id: number;
   code: string;
-  name: string | null;
+  name: string;
   element: Element | null;
   attack: number | null;
   hp: number | null;
@@ -38,112 +48,138 @@ type CardRowDB = RowDataPacket & {
   image: string | null;
 };
 
-/* ===== Cache ข้าม hot-reload ===== */
-declare global {
-  // eslint-disable-next-line no-var
-  var __CARDS_ALL__: Record<string, CardRow> | undefined;
-  // eslint-disable-next-line no-var
-  var __CARDS_AT__: number | undefined;
-  // eslint-disable-next-line no-var
-  var __CARDS_LOADING__: Promise<Record<string, CardRow>> | undefined;
-  // eslint-disable-next-line no-var
-  var __CARDS_ERR_AT__: number | undefined;
+type CardsMap = Record<string, CardRow>;
+
+/* ========= Connection pool (cache) ========= */
+
+let poolPromise: Promise<Pool> | null = null;
+function getPool(): Promise<Pool> {
+  if (!poolPromise) poolPromise = createPool();
+  return poolPromise!;
 }
 
-const TTL = 60_000;      // 60s
-const BACKOFF = 15_000;  // 15s
+/* ========= In-memory cache ========= */
 
-function now(): number { return Date.now(); }
+const CACHE_TTL_MS = 60_000; // 60s
+let cardsCache: { at: number; map: CardsMap } | null = null;
 
-async function loadAllFromDB(): Promise<Record<string, CardRow>> {
-  const pool = getPool();
+function now(): number {
+  return Date.now();
+}
+
+function normalizeRow(r: CardRowDB): CardRow {
+  return {
+    code: String(r.code),
+    name: String(r.name ?? r.code ?? ""),
+    element: (r.element ?? "Neutral") as Element | "Neutral",
+    attack: Number(r.attack ?? 0),
+    hp: Number(r.hp ?? 0),
+    ability: String(r.ability ?? ""),
+    cost: Number(r.cost ?? 0),
+    type: r.type ?? null,
+    rarity: r.rarity ?? null,
+    role: r.role ?? null,
+    image: r.image ?? null,
+  };
+}
+
+/** โหลดการ์ดทั้งหมดจาก DB เป็น map[code] */
+async function loadAllFromDB(): Promise<CardsMap> {
+  const pool = await getPool();
+
   const sql = `
-    SELECT code, name, element, attack, hp, ability, cost, type, rarity, role, image
+    SELECT
+      id, code, name, element,
+      attack, hp, ability, cost, type, rarity, role, image
     FROM cards
     ORDER BY id ASC
   `;
-  const [rows] = await pool.query<CardRowDB[]>(sql);
 
-  const map: Record<string, CardRow> = {};
+  const [rows] = await pool.execute<CardRowDB[]>(sql);
+
+  const map: CardsMap = {};
   for (const r of rows ?? []) {
     const code = String(r.code);
-    map[code] = {
-      code,
-      name: String(r.name ?? code),
-      element: (r.element ?? "Neutral") as Element,
-      attack: Number(r.attack ?? 0),
-      hp: Number(r.hp ?? 0),
-      ability: String(r.ability ?? ""),
-      cost: Number(r.cost ?? 0),
-      type: r.type,
-      rarity: r.rarity,
-      role: r.role,
-      image: r.image,
-    };
+    map[code] = normalizeRow(r);
   }
   return map;
 }
 
-async function getAllCards(): Promise<Record<string, CardRow>> {
-  const t = now();
-
-  if (global.__CARDS_ALL__ && global.__CARDS_AT__ && t - global.__CARDS_AT__ < TTL) {
-    return global.__CARDS_ALL__;
-  }
-  if (global.__CARDS_ERR_AT__ && t - global.__CARDS_ERR_AT__ < BACKOFF) {
-    if (global.__CARDS_ALL__) return global.__CARDS_ALL__;
-    throw new Error("backoff-no-cache");
-  }
-  if (global.__CARDS_LOADING__) return global.__CARDS_LOADING__;
-
-  global.__CARDS_LOADING__ = (async () => {
-    try {
-      const data = await loadAllFromDB();
-      global.__CARDS_ALL__ = data;
-      global.__CARDS_AT__ = now();
-      return data;
-    } catch (e) {
-      global.__CARDS_ERR_AT__ = now();
-      throw e instanceof Error ? e : new Error("LOAD_CARDS_FAILED");
-    } finally {
-      global.__CARDS_LOADING__ = undefined;
-    }
-  })();
-
-  return global.__CARDS_LOADING__;
-}
-
-export async function GET(req: Request) {
-  const url = new URL(req.url);
-  const codesParam = url.searchParams.get("codes");
-  const want = (codesParam || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-
-  let all: Record<string, CardRow> | null = null;
+/** ให้แหล่งข้อมูลการ์ด (โหลด DB เมื่อ cache หมดอายุ) */
+async function getCardsMap(): Promise<CardsMap> {
+  const fresh = cardsCache && now() - cardsCache.at < CACHE_TTL_MS;
+  if (fresh && cardsCache) return cardsCache.map;
 
   try {
-    all = await getAllCards();
-  } catch (e) {
-    // eslint-disable-next-line no-console
-    console.error("[api/cards] loadAllCards failed:", e);
-    if (global.__CARDS_ALL__) {
-      all = global.__CARDS_ALL__;
-    }
+    const map = await loadAllFromDB();
+    cardsCache = { at: now(), map };
+    return map;
+  } catch {
+    // DB ล่ม → ถ้ามี cache เดิมให้ใช้ไปก่อน
+    if (cardsCache) return cardsCache.map;
+    // ไม่มี cache เลย → คืนว่าง
+    return {};
   }
+}
 
-  const list: CardRow[] = [];
-  if (all) {
-    if (want.length) {
-      for (const c of want) {
-        const item = all[c];
-        if (item) list.push(item);
-      }
+/* ========= GET handler =========
+   - /api/cards                -> การ์ดทั้งหมด
+   - /api/cards?codes=A,B,C    -> เฉพาะ code ที่ขอ (คั่น ,)
+*/
+export async function GET(req: Request) {
+  try {
+    const url = new URL(req.url);
+    const codesParam = url.searchParams.get("codes");
+
+    const map = await getCardsMap();
+
+    let cards: CardRow[];
+
+    if (codesParam && codesParam.trim().length > 0) {
+      const wanted = codesParam
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+
+      cards = wanted.map((c) => {
+        const found = map[c];
+        // ถ้าไม่พบใน DB ให้ทำ fallback card เปล่า ๆ ด้วยชื่ออ่านง่าย
+        if (!found) {
+          const pretty = c.replaceAll("_", " ");
+          return {
+            code: c,
+            name: pretty,
+            element: "Neutral",
+            attack: 0,
+            hp: 0,
+            ability: "",
+            cost: 0,
+            type: null,
+            rarity: null,
+            role: null,
+            image: null,
+          } satisfies CardRow;
+        }
+        return found;
+      });
     } else {
-      list.push(...Object.values(all));
+      cards = Object.values(map);
     }
-  }
 
-  return NextResponse.json({ ok: true, cards: list }, { status: 200 });
+    return NextResponse.json(
+      {
+        ok: true,
+        count: cards.length,
+        cards,
+        cacheAgeMs: cardsCache ? now() - cardsCache.at : null,
+      },
+      { status: 200 }
+    );
+  } catch (e) {
+    // ถ้าเกิด error หนัก ๆ ก็คืน minimal payload เพื่อไม่ให้หน้าเพลย์พัง
+    return NextResponse.json(
+      { ok: false, error: "CARDS_FETCH_FAILED", cards: [] as CardRow[] },
+      { status: 503 }
+    );
+  }
 }
