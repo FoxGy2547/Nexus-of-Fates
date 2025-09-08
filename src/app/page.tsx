@@ -6,7 +6,9 @@ import { signIn, signOut, useSession } from "next-auth/react";
 import type { Session } from "next-auth";
 import Image from "next/image";
 
-/** เรียก API game (generic, ไม่ใช้ any) */
+/* ===================== helpers ===================== */
+
+/** call /api/game แบบ robust – parse ทั้ง JSON/ข้อความ แล้วโยน error ชัด ๆ */
 async function post<T>(body: unknown): Promise<T> {
   const res = await fetch("/api/game", {
     method: "POST",
@@ -14,36 +16,54 @@ async function post<T>(body: unknown): Promise<T> {
     cache: "no-store",
     body: JSON.stringify(body),
   });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(txt || res.statusText);
+
+  const text = await res.text().catch(() => "");
+  let json: unknown = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    /* noop */
   }
-  return res.json() as Promise<T>;
+
+  if (!res.ok) {
+    const msg =
+      (json as { error?: string } | null)?.error ??
+      (text || res.statusText || "Request failed");
+    throw new Error(msg);
+  }
+  return (json as T) ?? ({} as T);
 }
 
-/** userId เสถียรทั้งแอป */
+/** userId เสถียรทั้งแอป (auth > email > guestId) */
 function stableUserId(session: Session | null | undefined): string {
   if (typeof window === "undefined") return "ssr";
   const authId =
-    session?.user?.id ??
+    (session?.user as { id?: string | null } | undefined)?.id ??
     session?.user?.email ??
     null;
   if (authId) return String(authId);
   const key = "NOF_guestId";
   let id = localStorage.getItem(key);
-  if (!id) { id = crypto.randomUUID(); localStorage.setItem(key, id); }
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem(key, id);
+  }
   return id;
 }
 
 function randRoom(len = 6) {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let out = "";
-  for (let i = 0; i < len; i++) out += alphabet[Math.floor(Math.random() * alphabet.length)];
+  for (let i = 0; i < len; i++)
+    out += alphabet[Math.floor(Math.random() * alphabet.length)];
   return out;
 }
 
+/* ===================== types ===================== */
 type CreateJoinResponse = { ok: boolean; roomId: string };
+type PlayerInfo = { userId: string; name?: string | null; avatar?: string | null };
 
+/* ===================== page ===================== */
 export default function Home() {
   const { data: session, status } = useSession();
   const router = useRouter();
@@ -51,7 +71,8 @@ export default function Home() {
   const [createCode, setCreateCode] = useState<string>(randRoom());
   const [joinCode, setJoinCode] = useState<string>("");
 
-  const user = useMemo(() => {
+  /** payload user ที่จะส่งขึ้นเซิร์ฟเวอร์ */
+  const user: PlayerInfo = useMemo(() => {
     const id = stableUserId(session);
     return {
       userId: id,
@@ -63,7 +84,11 @@ export default function Home() {
   async function onCreate() {
     try {
       const roomId = (createCode || randRoom()).toUpperCase();
-      const res = await post<CreateJoinResponse>({ action: "createRoom", roomId, user });
+      const res = await post<CreateJoinResponse>({
+        action: "createRoom",
+        roomId,
+        user, // <<< ส่งเป็นอ็อบเจ็กต์ตามสเปค
+      });
       router.push(`/play/${res.roomId}`);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "unknown";
@@ -74,8 +99,15 @@ export default function Home() {
   async function onJoin() {
     try {
       const roomId = (joinCode || "").trim().toUpperCase();
-      if (!roomId) { alert("กรอกรหัสห้องก่อนนะ"); return; }
-      const res = await post<CreateJoinResponse>({ action: "joinRoom", roomId, user });
+      if (!roomId) {
+        alert("กรอกรหัสห้องก่อนนะ");
+        return;
+      }
+      const res = await post<CreateJoinResponse>({
+        action: "joinRoom",
+        roomId,
+        user, // <<< ส่งเป็นอ็อบเจ็กต์ตามสเปค
+      });
       router.push(`/play/${res.roomId}`);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "unknown";
@@ -101,12 +133,18 @@ export default function Home() {
               />
             )}
             <span>{session?.user?.name ?? "Discord User"}</span>
-            <button className="px-3 py-1 rounded bg-red-600" onClick={() => signOut()}>
+            <button
+              className="px-3 py-1 rounded bg-red-600"
+              onClick={() => signOut()}
+            >
               Logout
             </button>
           </>
         ) : (
-          <button className="px-3 py-1 rounded bg-indigo-600" onClick={() => signIn("discord")}>
+          <button
+            className="px-3 py-1 rounded bg-indigo-600"
+            onClick={() => signIn("discord")}
+          >
             Login with Discord
           </button>
         )}
@@ -124,8 +162,7 @@ export default function Home() {
               onChange={(e) => setCreateCode(e.target.value.toUpperCase())}
             />
             <button
-              className="px-4 py-2 rounded bg-emerald-600 disabled:opacity-50"
-              disabled={status !== "authenticated"}
+              className="px-4 py-2 rounded bg-emerald-600"
               onClick={onCreate}
             >
               Create
@@ -147,9 +184,9 @@ export default function Home() {
               onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
             />
             <button
-              className="px-4 py-2 rounded bg-sky-600 disabled:opacity-50"
-              disabled={status !== "authenticated" || !joinCode}
+              className="px-4 py-2 rounded bg-sky-600"
               onClick={onJoin}
+              disabled={!joinCode.trim()}
             >
               Join
             </button>
