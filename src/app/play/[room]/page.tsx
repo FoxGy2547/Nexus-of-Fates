@@ -434,7 +434,9 @@ export default function PlayRoomPage() {
       {cs?.mode === "lobby" && (
         <section className="rounded-2xl border border-white/10 p-6 bg-black/20">
           <div className="flex items-center gap-4">
-            <button className="px-5 py-2 rounded bg-emerald-600" onClick={ready}>
+            <button className="px-5 py-2 rounded bg-emerald-600 disabled:opacity-50"
+                    onClick={ready}
+                    disabled={!you}>
               Ready
             </button>
             <div className="text-sm">
