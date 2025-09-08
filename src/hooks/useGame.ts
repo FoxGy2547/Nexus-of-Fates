@@ -66,29 +66,54 @@ function stableGuestId(): string {
   return id;
 }
 
-function useStableUserId(): string {
+/** ดึง user (id/name/avatar) จาก next-auth; ถ้าไม่มี ใช้ guest */
+function useStableUser() {
   const { data: session } = useSession();
   return useMemo(() => {
-    const fromAuth =
+    const userId =
       (session?.user as { id?: string | null } | undefined)?.id ??
       session?.user?.email ??
-      null;
-    return fromAuth ? String(fromAuth) : stableGuestId();
+      stableGuestId();
+    const name = session?.user?.name ?? null;
+    const avatar = (session?.user as { image?: string | null } | undefined)?.image ?? null;
+    return { userId: String(userId), name, avatar };
   }, [session?.user]);
 }
 
-async function post<T>(body: unknown): Promise<T> {
-  const res = await fetch("/api/game", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    cache: "no-store",
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(txt || res.statusText);
+/** POST กันแฮง + จับ error นิ่ม ๆ */
+async function post<T>(
+  body: unknown,
+  { timeoutMs = 8000 }: { timeoutMs?: number } = {}
+): Promise<T> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch("/api/game", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      cache: "no-store",
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+
+    const text = await res.text().catch(() => "");
+    let json: unknown = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      // ignore
+    }
+
+    if (!res.ok) {
+      const msg =
+        (json as { error?: string } | null)?.error ??
+        (text || `${res.status} ${res.statusText}`);
+      throw new Error(msg);
+    }
+    return json as T;
+  } finally {
+    clearTimeout(t);
   }
-  return res.json() as Promise<T>;
 }
 
 /* ========= hook ========= */
@@ -105,60 +130,80 @@ type UseGameReturn = {
 };
 
 export function useGame(roomId: string): UseGameReturn {
-  const userId = useStableUserId();
+  const me = useStableUser();
 
   const [players, setPlayers] = useState<ServerPlayers>({ p1: null, p2: null });
   const [state, setState] = useState<ClientState | null>(null);
 
-  const timer = useRef<number | null>(null);
-  const youSticky = useRef<Side | null>(null); // จำที่นั่งล่าสุด
+  const pollTimer = useRef<number | null>(null);
+  const pullLock = useRef(false);
+  const joinLock = useRef(false);
+  const actionLock = useRef(false);
+  const youSticky = useRef<Side | null>(null);
+  const lastPullFailAt = useRef<number>(0);
+
+  const parseServerState = useCallback((s?: ServerState) => {
+    if (!s) return;
+    if (s.phase === "lobby") {
+      setState({
+        mode: "lobby",
+        ready: s.ready ?? { p1: false, p2: false },
+        rngSeed: s.rngSeed,
+        lastAction: s.lastAction,
+      });
+    } else if (s.phase === "play") {
+      setState({
+        mode: "play",
+        turn: s.turn,
+        phaseNo: s.phaseNo ?? 1,
+        hero: s.hero ?? { p1: 30, p2: 30 },
+        dice: s.dice ?? { p1: {}, p2: {} },
+        board: s.board ?? { p1: [], p2: [] },
+        hand: s.hand ?? { p1: [], p2: [] },
+        lastAction: s.lastAction,
+      });
+    }
+  }, []);
 
   const pull = useCallback(async () => {
+    if (pullLock.current) return;
+    pullLock.current = true;
     try {
       const res = await post<ApiStateResponse>({ action: "state", roomId });
       if (res.players) setPlayers(res.players);
-
-      const s = res.state;
-      if (s?.phase === "lobby") {
-        setState({
-          mode: "lobby",
-          ready: s.ready ?? { p1: false, p2: false },
-          rngSeed: s.rngSeed,
-          lastAction: s.lastAction,
-        });
-      } else if (s?.phase === "play") {
-        setState({
-          mode: "play",
-          turn: s.turn,
-          phaseNo: s.phaseNo ?? 1,
-          hero: s.hero ?? { p1: 30, p2: 30 },
-          dice: s.dice ?? { p1: {}, p2: {} },
-          board: s.board ?? { p1: [], p2: [] },
-          hand: s.hand ?? { p1: [], p2: [] },
-          lastAction: s.lastAction,
-        });
-      }
+      parseServerState(res.state);
+      lastPullFailAt.current = 0;
     } catch {
-      // เงียบ ๆ ไปก่อน
+      lastPullFailAt.current = Date.now();
+    } finally {
+      pullLock.current = false;
     }
-  }, [roomId]);
+  }, [roomId, parseServerState]);
 
-  // auto-poll
+  // auto-poll + backoff เล็กน้อย
   useEffect(() => {
-    pull();
-    timer.current = window.setInterval(pull, 1200);
+    const tick = async () => {
+      await pull();
+      const base = document.visibilityState === "visible" ? 1600 : 2400;
+      const backoff =
+        lastPullFailAt.current && Date.now() - lastPullFailAt.current < 5000
+          ? 1200
+          : 0;
+      pollTimer.current = window.setTimeout(tick, base + backoff);
+    };
+    tick();
     return () => {
-      if (timer.current) window.clearInterval(timer.current);
-      timer.current = null;
+      if (pollTimer.current) window.clearTimeout(pollTimer.current);
+      pollTimer.current = null;
     };
   }, [pull]);
 
-  // หา you ตาม players และจำค่าไว้กันหายตอน state กลับมาไม่ทัน
+  // หา you และจำไว้กันหายตอน pull ช้า
   const computedYou: Side | null = useMemo(() => {
-    if (players.p1?.userId === userId) return "p1";
-    if (players.p2?.userId === userId) return "p2";
+    if (players.p1?.userId === me.userId) return "p1";
+    if (players.p2?.userId === me.userId) return "p2";
     return null;
-  }, [players, userId]);
+  }, [players, me.userId]);
 
   useEffect(() => {
     if (computedYou) youSticky.current = computedYou;
@@ -166,72 +211,150 @@ export function useGame(roomId: string): UseGameReturn {
 
   const you: Side | null = computedYou ?? youSticky.current ?? null;
 
-  // auto-join: ถ้ายังไม่มีที่นั่งเรา ให้เรียก join ด้วย userId
+  // auto-join: ถ้ายังไม่มีที่นั่งเรา → joinRoom
   const join = useCallback(async () => {
+    if (joinLock.current) return;
+    joinLock.current = true;
     try {
-      // พยายามทั้ง "join" และ "joinRoom" เผื่อ backend ใช้อย่างใดอย่างหนึ่ง
-      await post<{ ok: boolean }>({ action: "join", roomId, userId });
+      await post<{ ok: boolean }>({
+        action: "joinRoom",
+        roomId,
+        user: {
+          userId: me.userId,
+          name: me.name ?? null,
+          avatar: me.avatar ?? null,
+        },
+      });
     } catch {
-      await post<{ ok: boolean }>({ action: "joinRoom", roomId, userId });
+      // เงียบไว้
     } finally {
+      joinLock.current = false;
       await pull();
     }
-  }, [roomId, userId, pull]);
+  }, [roomId, me.userId, me.name, me.avatar, pull]);
 
+  // พยายาม join อัตโนมัติเมื่อมีที่ว่าง
   useEffect(() => {
     const weAreIn =
-      players.p1?.userId === userId || players.p2?.userId === userId;
+      players.p1?.userId === me.userId || players.p2?.userId === me.userId;
     const seatAvailable = !players.p1 || !players.p2;
-    if (!weAreIn && seatAvailable) {
-      void join();
-    }
-  }, [players, userId, join]);
+    if (!weAreIn && seatAvailable) void join();
+  }, [players, me.userId, join]);
 
-  // ห้ามเดาเป็น p1 อีกต่อไป
-  const ensureSide = useCallback(async (): Promise<Side> => {
+  // ensureSide: ถ้ายังไม่มีที่นั่ง จะพยายาม join 1 รอบ แล้วเลิกเงียบ ๆ
+  const ensureSide = useCallback(async (): Promise<Side | null> => {
     if (you === "p1" || you === "p2") return you;
-    await join(); // เคลมที่นั่งก่อน
-    // ดึงล่าสุดแล้วเช็คใหม่
-    const latest = (players.p1?.userId === userId ? "p1" : players.p2?.userId === userId ? "p2" : null) as Side | null;
-    if (latest) return latest;
-    // กันพลาด: ถ้าเซิร์ฟเวอร์ยังไม่ให้ที่นั่ง โยน error เพื่อไม่ให้ส่ง action มั่ว
-    throw new Error("Seat not assigned yet");
-  }, [you, join, players.p1?.userId, players.p2?.userId, userId]);
+    await join();
+    const latest =
+      players.p1?.userId === me.userId
+        ? "p1"
+        : players.p2?.userId === me.userId
+        ? "p2"
+        : null;
+    return latest ?? null;
+  }, [you, join, players, me.userId]);
+
+  // ตัวห่อกันยิงซ้อนทุก action
+  const withActionLock = useCallback(
+    async (fn: () => Promise<void>) => {
+      if (actionLock.current) return;
+      actionLock.current = true;
+      try {
+        await fn();
+      } catch {
+        // เงียบ ๆ
+      } finally {
+        actionLock.current = false;
+        await pull();
+      }
+    },
+    [pull]
+  );
 
   const ready = useCallback(async () => {
-    const side = await ensureSide();
-    await post<void>({ action: "ready", roomId, side, userId });
-    await pull();
-  }, [ensureSide, pull, roomId, userId]);
+    await withActionLock(async () => {
+      const side = await ensureSide();
+      if (!side) return;
+      try {
+        await post<void>({ action: "ready", roomId, side, userId: me.userId });
+      } catch {
+        /* no-op */
+      }
+    });
+  }, [ensureSide, roomId, me.userId, withActionLock]);
 
   const endTurn = useCallback(async () => {
-    const side = await ensureSide();
-    await post<void>({ action: "action", roomId, side, userId, payload: { kind: "endTurn" } });
-    await pull();
-  }, [ensureSide, pull, roomId, userId]);
+    await withActionLock(async () => {
+      const side = await ensureSide();
+      if (!side) return;
+      try {
+        await post<void>({
+          action: "action",
+          roomId,
+          side,
+          payload: { kind: "endTurn" },
+        });
+      } catch {
+        /* no-op */
+      }
+    });
+  }, [ensureSide, roomId, withActionLock]);
 
   const endPhase = useCallback(async () => {
-    const side = await ensureSide();
-    await post<void>({ action: "action", roomId, side, userId, payload: { kind: "endPhase" } });
-    await pull();
-  }, [ensureSide, pull, roomId, userId]);
+    await withActionLock(async () => {
+      const side = await ensureSide();
+      if (!side) return;
+      try {
+        await post<void>({
+          action: "action",
+          roomId,
+          side,
+          payload: { kind: "endPhase" },
+        });
+      } catch {
+        /* no-op */
+      }
+    });
+  }, [ensureSide, roomId, withActionLock]);
 
   const playCard = useCallback(
     async (index: number) => {
-      const side = await ensureSide();
-      await post<void>({ action: "action", roomId, side, userId, payload: { kind: "playCard", index } });
-      await pull();
+      await withActionLock(async () => {
+        const side = await ensureSide();
+        if (!side) return;
+        try {
+          await post<void>({
+            action: "action",
+            roomId,
+            side,
+            payload: { kind: "playCard", index },
+          });
+        } catch {
+          /* no-op */
+        }
+      });
     },
-    [ensureSide, pull, roomId, userId]
+    [ensureSide, roomId, withActionLock]
   );
 
   const attackActive = useCallback(
     async (index = 0) => {
-      const side = await ensureSide();
-      await post<void>({ action: "action", roomId, side, userId, payload: { kind: "attack", index } });
-      await pull();
+      await withActionLock(async () => {
+        const side = await ensureSide();
+        if (!side) return;
+        try {
+          await post<void>({
+            action: "action",
+            roomId,
+            side,
+            payload: { kind: "attack", index },
+          });
+        } catch {
+          /* no-op */
+        }
+      });
     },
-    [ensureSide, pull, roomId, userId]
+    [ensureSide, roomId, withActionLock]
   );
 
   return { you, players, state, ready, endTurn, endPhase, playCard, attackActive };

@@ -51,6 +51,7 @@ type Room = {
   p1?: PlayerInfo;
   p2?: PlayerInfo;
   state: RoomState;
+  __ts?: number; // last-touched timestamp (เพิ่มเพื่อ GC)
 };
 
 type Body =
@@ -85,6 +86,18 @@ let CARD_STATS =
     { atk: number; hp: number; element: Element; ability?: string; cost: number }
   >);
 
+/* ===== touch + simple GC ===== */
+function touch(room: Room) { room.__ts = Date.now(); }
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, r] of rooms) {
+    const ts = r.__ts ?? 0;
+    if (now - ts > 30 * 60 * 1000) { // 30 นาที
+      rooms.delete(id);
+    }
+  }
+}, 10 * 60 * 1000); // สแกนทุก 10 นาที
+
 /* ===================== RNG & utils ===================== */
 function hashToSeed(s: string) {
   let h = 2166136261 >>> 0;
@@ -105,7 +118,7 @@ function mulberry32(a: number) {
 function shuffle<T>(arr: T[], seed: string) {
   const rng = mulberry32(hashToSeed(seed));
   const a = arr.slice();
-  for (let i = a.length - 1; i > 0; i++) {
+  for (let i = a.length - 1; i > 0; i--) {
     const j = Math.floor(rng() * (i + 1));
     [a[i], a[j]] = [a[j], a[i]];
   }
@@ -124,7 +137,7 @@ function rollDice(seed: string, n = 10): DicePool {
   return d;
 }
 
-/* ===================== Cards fallback (ไม่มี DB ก็เล่นได้) ===================== */
+/* ===================== Cards fallback ===================== */
 if (!Object.keys(CARD_STATS).length) {
   const f = (e: Element, atk: number, hp: number, cost: number) => ({ element: e, atk, hp, cost });
   CARD_STATS = {
@@ -152,16 +165,18 @@ function getOrCreateRoom(roomId?: string) {
   const id = (roomId || randomUUID().slice(0, 6)).toUpperCase();
   if (!rooms.has(id)) {
     const seed = randomUUID();
-    rooms.set(id, { id, seed, state: newLobby(seed) });
+    rooms.set(id, { id, seed, state: newLobby(seed), __ts: Date.now() });
   }
-  return { id, room: rooms.get(id)! };
+  const room = rooms.get(id)!;
+  touch(room);
+  rooms.set(id, room);
+  return { id, room };
 }
 function isLobby(st: RoomState): st is LobbyState { return st.phase === "lobby"; }
+function isPlay(st: RoomState): st is BattleState { return st.phase === "play"; }
 
 function sanitize(room: Room) {
-  if (!room.state || !("phase" in room.state)) {
-    room.state = newLobby(room.seed);
-  }
+  if (!room.state || !("phase" in room.state)) room.state = newLobby(room.seed);
   if (room.p1 && !room.p1.userId) room.p1 = undefined;
   if (room.p2 && !room.p2.userId) room.p2 = undefined;
   if (room.p1?.userId && room.p2?.userId && room.p1.userId === room.p2.userId) {
@@ -178,6 +193,7 @@ function forceSitP1(room: Room, user: PlayerInfo) {
     room.p2 = undefined;
     if (isLobby(room.state)) room.state.ready.p2 = false;
   }
+  touch(room);
 }
 
 /* ===================== Start / Phase / Turn ===================== */
@@ -310,7 +326,7 @@ function doEndPhase(st: BattleState, side: Side) {
   return { ok: true, patch: { lastAction: st.lastAction, dice: st.dice, hand: st.hand, turn: st.turn } } as const;
 }
 
-/* ===== applyAction types ===== */
+/* ===== applyAction ===== */
 type ApplyOk = { ok: true; patch?: Partial<BattleState> | null; winner?: Side | null };
 type ApplyErr = { ok: false; error: string };
 type ApplyRes = ApplyOk | ApplyErr;
@@ -338,7 +354,6 @@ export function GET() {
   return NextResponse.json({ ok: true, route: "game" });
 }
 
-/** type guard: ต้องมี action เป็น string */
 function hasActionField(v: unknown): v is { action: Body["action"] } {
   return typeof v === "object" && v !== null && typeof (v as Record<string, unknown>).action === "string";
 }
@@ -354,7 +369,7 @@ export async function POST(req: Request) {
     if (body.action === "createRoom") {
       const { id, room } = getOrCreateRoom(body.roomId);
       forceSitP1(room, body.user);
-      rooms.set(id, room);
+      rooms.set(id, room); touch(room);
       return NextResponse.json({
         ok: true,
         roomId: id,
@@ -369,24 +384,20 @@ export async function POST(req: Request) {
       sanitize(room);
 
       if (room.p1?.userId === body.user.userId) {
-        room.p1 = body.user;
-        rooms.set(id, room);
+        room.p1 = body.user; rooms.set(id, room); touch(room);
         return NextResponse.json({ ok: true, roomId: id, you: "p1", players: { p1: room.p1 ?? null, p2: room.p2 ?? null }, state: room.state });
       }
       if (room.p2?.userId === body.user.userId) {
-        room.p2 = body.user;
-        rooms.set(id, room);
+        room.p2 = body.user; rooms.set(id, room); touch(room);
         return NextResponse.json({ ok: true, roomId: id, you: "p2", players: { p1: room.p1 ?? null, p2: room.p2 ?? null }, state: room.state });
       }
 
       if (!room.p2) {
-        room.p2 = body.user;
-        rooms.set(id, room);
+        room.p2 = body.user; rooms.set(id, room); touch(room);
         return NextResponse.json({ ok: true, roomId: id, you: "p2", players: { p1: room.p1 ?? null, p2: room.p2 ?? null }, state: room.state });
       }
       if (!room.p1) {
-        room.p1 = body.user;
-        rooms.set(id, room);
+        room.p1 = body.user; rooms.set(id, room); touch(room);
         return NextResponse.json({ ok: true, roomId: id, you: "p1", players: { p1: room.p1 ?? null, p2: room.p2 ?? null }, state: room.state });
       }
 
@@ -398,20 +409,19 @@ export async function POST(req: Request) {
       if (!r) return NextResponse.json({ ok: true });
       if (r.p1?.userId === body.userId) { r.p1 = undefined; if (isLobby(r.state)) r.state.ready.p1 = false; }
       if (r.p2?.userId === body.userId) { r.p2 = undefined; if (isLobby(r.state)) r.state.ready.p2 = false; }
-      sanitize(r);
-      rooms.set(r.id, r);
+      sanitize(r); rooms.set(r.id, r); touch(r);
       return NextResponse.json({ ok: true });
     }
 
     if (body.action === "players") {
       const { room } = getOrCreateRoom(body.roomId);
-      sanitize(room);
+      sanitize(room); touch(room);
       return NextResponse.json({ ok: true, players: { p1: room.p1 ?? null, p2: room.p2 ?? null } });
     }
 
     if (body.action === "state") {
       const { room } = getOrCreateRoom(body.roomId);
-      sanitize(room);
+      sanitize(room); touch(room);
       return NextResponse.json({
         ok: true,
         state: room.state,
@@ -424,6 +434,7 @@ export async function POST(req: Request) {
       sanitize(room);
 
       if (!isLobby(room.state)) {
+        touch(room);
         return NextResponse.json({ ok: true, full: true, state: room.state });
       }
 
@@ -437,7 +448,7 @@ export async function POST(req: Request) {
       if (room.p1 && room.p2 && room.state.ready.p1 && room.state.ready.p2) {
         room.state = startPlayFromLobby(room.state);
       }
-      rooms.set(room.id, room);
+      rooms.set(room.id, room); touch(room);
       const full = room.state.phase === "play";
       return NextResponse.json({
         ok: true,
@@ -453,8 +464,8 @@ export async function POST(req: Request) {
 
       const res = applyAction(r.state, body.side, body.payload);
       if (!res.ok) return NextResponse.json(res, { status: 400 });
-      if (res.patch && r.state.phase === "play") Object.assign(r.state, res.patch);
-      rooms.set(r.id, r);
+      if (res.patch && isPlay(r.state)) Object.assign(r.state, res.patch);
+      rooms.set(r.id, r); touch(r);
 
       return NextResponse.json({ ok: true, patch: res.patch ?? null, winner: res.winner ?? null });
     }

@@ -295,12 +295,9 @@ function SimpleCard({ code, meta }: { code: string; meta?: CardMeta }) {
 function useCardMetaMap(allCodes: string[]) {
   const [meta, setMeta] = useState<CardMetaMap>({});
 
-  // ทำ list ให้ “เสถียร” ก่อน แล้วค่อยใช้ใน useEffect
-  const wanted = useMemo(() => Array.from(new Set(allCodes)), [allCodes]);
-  const wantedKey = useMemo(() => wanted.join(","), [wanted]);
-
   useEffect(() => {
-    if (!wanted.length) return;
+    if (!allCodes.length) return;
+    const wanted = Array.from(new Set(allCodes)); // unique list
 
     fetch(`/api/cards?codes=${encodeURIComponent(wanted.join(","))}`)
       .then(async (r) => {
@@ -345,7 +342,7 @@ function useCardMetaMap(allCodes: string[]) {
         }
         setMeta(map);
       });
-  }, [wantedKey]); // ✅ ไม่มี complex expression ใน deps แล้ว
+  }, [JSON.stringify(allCodes)]);
 
   return meta;
 }
@@ -434,9 +431,7 @@ export default function PlayRoomPage() {
       {cs?.mode === "lobby" && (
         <section className="rounded-2xl border border-white/10 p-6 bg-black/20">
           <div className="flex items-center gap-4">
-            <button className="px-5 py-2 rounded bg-emerald-600 disabled:opacity-50"
-                    onClick={ready}
-                    disabled={!you}>
+            <button className="px-5 py-2 rounded bg-emerald-600" onClick={ready}>
               Ready
             </button>
             <div className="text-sm">
