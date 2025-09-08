@@ -447,7 +447,7 @@ export default function PlayRoomPage() {
       {/* ===== PLAY ===== */}
       {cs?.mode === "play" && (
         <>
-          {/* ---------- OPPONENT FIELD (บน) ---------- */}
+          {/* ---------- OPPONENT FIELD ---------- */}
           <section className="rounded-3xl border border-white/10 p-5 bg-black/20">
             <FieldHeader
               tag={opponentSide.toUpperCase() as "P1" | "P2"}
@@ -483,7 +483,7 @@ export default function PlayRoomPage() {
             </div>
           </section>
 
-          {/* ---------- YOUR FIELD (ล่าง) ---------- */}
+          {/* ---------- YOUR FIELD ---------- */}
           <section className="rounded-3xl border border-white/10 p-5 bg-black/20">
             <FieldHeader
               tag={yourSide.toUpperCase() as "P1" | "P2"}
