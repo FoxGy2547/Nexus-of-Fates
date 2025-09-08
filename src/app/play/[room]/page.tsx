@@ -56,7 +56,7 @@ const ELEMENT_ICON: Record<string, string> = {
   Neutral: "/dice/neutral.png",
 };
 
-/* แผนที่รูปการ์ด */
+/* แผนที่รูปการ์ด (ชื่อไฟล์ตรงกับที่มีอยู่) */
 const CARD_IMG: Record<string, string> = {
   BLAZE_KNIGHT: "/cards/Blaze Knight.png",
   CINDER_SCOUT: "/cards/Cinder Scout.png",
@@ -70,7 +70,7 @@ const CARD_IMG: Record<string, string> = {
   VOID_SEER: "/cards/Void Seer.png",
   WAVECALLER: "/cards/Wavecaller.png",
   WINDBLADE_DUELIST: "/cards/Windblade Duelist.png",
-  HEALING_AMULET: "/cards/Healing Amulet.png", // สกิล/ซัพพอร์ต (ไม่มีกรอบ)
+  HEALING_AMULET: "/cards/Healing Amulet.png",
   BLAZING_SIGIL: "/cards/Blazing Sigil.png",
 };
 
@@ -170,8 +170,8 @@ const FRAME_SRC = "/card_frame.png";
 /** พิกัดอิงเฟรม — ตำแหน่งกึ่งกลาง (%) + ขนาดวงกลม (%) */
 const POS = {
   el:   { cx: 83.4, cy: 12.0, d: 18.6 }, // ธาตุ ขวาบน
-  atk:  { cx: 13.5, cy: 89.0, d: 19.4 }, // ATK ล่างซ้าย (วงแดง)
-  hp:   { cx: 85.8, cy: 89.0, d: 19.4 }, // HP ล่างขวา (วงฟ้า)
+  atk:  { cx: 13.5, cy: 89.0, d: 19.4 }, // ATK ล่างซ้าย
+  hp:   { cx: 85.8, cy: 89.0, d: 19.4 }, // HP ล่างขวา
   name: { cx: 50.0, cy: 72.0, w: 73.0, h: 8.2 }, // ชื่อกลาง
 };
 const textShadow = "0 1px 2px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,0.7)";
@@ -238,18 +238,13 @@ function CharacterCardFramed({ u, meta }: { u: UnitVM; meta?: CardMeta }) {
       style={{ width: FRAME_W, height: FRAME_H }}
       title={`${name} — ATK ${atk} / HP ${hp} / ${element}`}
     >
-      {/* ภาพการ์ด */}
       <CardBase code={u.code} />
-
-      {/* เฟรม */}
       <Image src={FRAME_SRC} alt="frame" fill className="pointer-events-none object-cover" unoptimized />
 
-      {/* ธาตุ */}
       <CircleOverlay cx={POS.el.cx} cy={POS.el.cy} dPct={POS.el.d}>
         <Image src={icon} alt={element} fill sizes="100%" className="object-contain pointer-events-none" unoptimized />
       </CircleOverlay>
 
-      {/* ATK */}
       <CircleOverlay cx={POS.atk.cx} cy={POS.atk.cy} dPct={POS.atk.d}>
         <span
           className="font-semibold text-white tabular-nums"
@@ -259,7 +254,6 @@ function CharacterCardFramed({ u, meta }: { u: UnitVM; meta?: CardMeta }) {
         </span>
       </CircleOverlay>
 
-      {/* HP */}
       <CircleOverlay cx={POS.hp.cx} cy={POS.hp.cy} dPct={POS.hp.d}>
         <span
           className="font-semibold text-white tabular-nums"
@@ -269,7 +263,6 @@ function CharacterCardFramed({ u, meta }: { u: UnitVM; meta?: CardMeta }) {
         </span>
       </CircleOverlay>
 
-      {/* NAME */}
       <NameOverlay cx={POS.name.cx} cy={POS.name.cy} wPct={POS.name.w} hPct={POS.name.h}>
         <span
           className="font-medium"
@@ -308,11 +301,15 @@ function useCardMetaMap(allCodes: string[]) {
 
     fetch(`/api/cards?codes=${encodeURIComponent(wanted.join(","))}`)
       .then(async (r) => {
-        let data: any = {};
-        try { data = await r.json(); } catch {}
+        let data: unknown;
+        try { data = await r.json(); } catch { data = null; }
+
+        const asOk = (val: unknown): val is { ok: boolean; cards: CardMeta[] } =>
+          typeof val === "object" && val !== null && "ok" in (val as Record<string, unknown>);
+
         const map: CardMetaMap = {};
-        if (data?.ok && Array.isArray(data.cards)) {
-          for (const c of data.cards) map[c.code] = c as CardMeta;
+        if (asOk(data) && Array.isArray((data as { cards: unknown }).cards)) {
+          for (const c of (data as { cards: CardMeta[] }).cards) map[c.code] = c;
         } else {
           for (const code of wanted) {
             map[code] = {

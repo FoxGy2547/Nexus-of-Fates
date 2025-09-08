@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { randomUUID } from "crypto";
 import { getPool } from "@/lib/db";
+import type { RowDataPacket } from "mysql2";
 
 /* Next.js route config */
 export const runtime = "nodejs";
@@ -22,13 +23,13 @@ type LobbyState = {
   phase: "lobby";
   ready: { p1: boolean; p2: boolean };
   rngSeed: string;
-  lastAction: any;
+  lastAction: LastAction | null;
 };
 
 type BattleState = {
   phase: "play";
   rngSeed: string;
-  lastAction: any;
+  lastAction: LastAction | null;
 
   phaseNo: number;
   phaseStarter: Side;
@@ -56,6 +57,12 @@ type Room = {
   state: RoomState;
 };
 
+type PlayCardPayload = { kind: "playCard"; index: number };
+type AttackPayload   = { kind: "attack"; index: number };
+type EndTurnPayload  = { kind: "endTurn" };
+type EndPhasePayload = { kind: "endPhase" };
+type Payload = PlayCardPayload | AttackPayload | EndTurnPayload | EndPhasePayload;
+
 type Body =
   | { action: "createRoom"; roomId?: string; user: PlayerInfo }
   | { action: "joinRoom"; roomId: string; user: PlayerInfo }
@@ -67,13 +74,16 @@ type Body =
       action: "action";
       roomId: string;
       side: Side;
-      payload:
-        | { kind: "playCard"; index: number }
-        | { kind: "attack"; index: number }
-        | { kind: "endTurn" }
-        | { kind: "endPhase" }
-        | Record<string, unknown>;
+      payload: Payload;
     };
+
+/* ===== lastAction type-safe ===== */
+type LastAction =
+  | { kind: "playCard"; side: Side; code: string }
+  | { kind: "attackUnit"; side: Side; code: string; target: string; dmg: number; coun: number }
+  | { kind: "attackHero"; side: Side; code: string; dmg: number }
+  | { kind: "endTurn" }
+  | { kind: "endPhase"; side: Side; phaseNo: number };
 
 /* ===================== In-memory store ===================== */
 // eslint-disable-next-line no-var
@@ -122,7 +132,7 @@ const ELEMENTS: Element[] = ["Pyro","Hydro","Cryo","Electro","Geo","Anemo","Quan
 function emptyDice(): DicePool { const d = {} as DicePool; for (const e of ELEMENTS) d[e] = 0; return d; }
 function rollDice(seed: string, n = 10): DicePool {
   const rng = mulberry32(hashToSeed(seed));
-  const d = emptyDice();
+  const d: DicePool = { Pyro:0, Hydro:0, Cryo:0, Electro:0, Geo:0, Anemo:0, Quantum:0, Imaginary:0, Neutral:0 };
   for (let i = 0; i < n; i++) {
     const e = ELEMENTS[Math.floor(rng() * ELEMENTS.length)];
     d[e] += 1;
@@ -131,15 +141,23 @@ function rollDice(seed: string, n = 10): DicePool {
 }
 
 /* ===================== Cards (DB or fallback) ===================== */
+type CardRowDB = RowDataPacket & {
+  code: string;
+  element: Element | null;
+  atk: number | null;
+  hp: number | null;
+  ability: string | null;
+  cost: number | null;
+};
+
 async function ensureCardStatsLoaded() {
   if (Object.keys(CARD_STATS).length) return;
   try {
     const pool = getPool();
-    if (!pool) throw new Error("no-db");
-    const [rows] = await pool.query<any[]>(
+    const [rows] = await pool.query<CardRowDB[]>(
       "SELECT code, element, attack AS atk, hp, ability, cost FROM cards"
     );
-    for (const r of rows) {
+    for (const r of rows ?? []) {
       if (!r?.code) continue;
       CARD_STATS[r.code] = {
         atk: Number(r.atk ?? 0),
@@ -185,7 +203,6 @@ function getOrCreateRoom(roomId?: string) {
 }
 function isLobby(st: RoomState): st is LobbyState { return st.phase === "lobby"; }
 
-/** กัน state เพี้ยน + ห้าม user เดิมนั่งสองฝั่ง */
 function sanitize(room: Room) {
   if (!room.state || !("phase" in room.state)) {
     room.state = newLobby(room.seed);
@@ -198,7 +215,6 @@ function sanitize(room: Room) {
   }
 }
 
-/** จัดที่นั่ง: user เดิม → คืนที่เดิม; ไม่อนุญาตซ้อนอีกฝั่ง */
 function attachOrReuse(room: Room, user: PlayerInfo, prefer?: Side): Side | null {
   sanitize(room);
   if (room.p1?.userId === user.userId) { room.p1 = user; return "p1"; }
@@ -224,7 +240,7 @@ function startPlayFromLobby(lobby: LobbyState): BattleState {
   const mkUnit = (code: string): Unit => {
     const s = CARD_STATS[code];
     return { code, atk: s.atk, hp: s.hp, element: s.element };
-    };
+  };
 
   const st: BattleState = {
     phase: "play",
@@ -251,7 +267,7 @@ function startPlayFromLobby(lobby: LobbyState): BattleState {
     temp: { p1: { plusDmg: 0, shieldNext: 0 }, p2: { plusDmg: 0, shieldNext: 0 } },
   };
 
-  // เริ่ม Phase แรก: แจก dice 10, จั่วการ์ดอื่น 4 ใบต่อคน
+  // Phase 1: แจก dice 10, จั่วการ์ดอื่น 4 ใบต่อคน
   st.dice.p1 = rollDice(`${seed}:phase:1:p1`, 10);
   st.dice.p2 = rollDice(`${seed}:phase:1:p2`, 10);
   st.hand.p1.push(...st.deck.p1.splice(0, 4));
@@ -263,8 +279,7 @@ function startPlayFromLobby(lobby: LobbyState): BattleState {
 function startTurn(st: BattleState, side: Side) {
   st.temp[side] = { plusDmg: 0, shieldNext: 0 };
   st.playedCount[side] = 0;
-  // จั่วการ์ดอื่น 2 ใบทุกต้นเทิร์น
-  st.hand[side].push(...st.deck[side].splice(0, 2));
+  st.hand[side].push(...st.deck[side].splice(0, 2)); // จั่ว 2
 }
 function endTurnAndPass(st: BattleState) {
   const next: Side = st.turn === "p1" ? "p2" : "p1";
@@ -275,14 +290,14 @@ function endTurnAndPass(st: BattleState) {
 /* ===================== Basic actions ===================== */
 function doPlayCard(st: BattleState, side: Side, index: number) {
   const hand = st.hand[side];
-  if (index < 0 || index >= hand.length) return { ok: false, error: "Invalid hand index" } as const;
+  if (index < 0 || index >= hand.length) return { ok: false as const, error: "Invalid hand index" };
   const code = hand[index];
   const cs = CARD_STATS[code];
-  if (!cs) return { ok: false, error: "Unknown card" } as const;
+  if (!cs) return { ok: false as const, error: "Unknown card" };
 
   const need = cs.cost ?? 0;
   if ((st.dice[side][cs.element] ?? 0) < need)
-    return { ok: false, error: "Not enough dice" } as const;
+    return { ok: false as const, error: "Not enough dice" };
 
   st.dice[side][cs.element] -= need;
   hand.splice(index, 1);
@@ -292,18 +307,17 @@ function doPlayCard(st: BattleState, side: Side, index: number) {
     st.temp[side].shieldNext = 0;
     st.board[side].push({ code, atk: cs.atk, hp, element: cs.element });
   } else {
-    // ใบอื่น ๆ — ใส่ผลง่าย ๆ demo: เพิ่มพลังโจมตีชั่วคราว
-    st.temp[side].plusDmg += 1;
+    st.temp[side].plusDmg += 1; // ใบอื่น demo effect
   }
 
   st.playedCount[side] += 1;
   st.lastAction = { kind: "playCard", side, code };
-  return { ok: true, patch: { hand: st.hand, board: st.board, dice: st.dice, lastAction: st.lastAction } } as const;
+  return { ok: true as const, patch: { hand: st.hand, board: st.board, dice: st.dice, lastAction: st.lastAction } };
 }
 
 function doAttack(st: BattleState, side: Side, idx: number) {
   const me = st.board[side];
-  if (idx < 0 || idx >= me.length) return { ok: false, error: "Invalid board index" } as const;
+  if (idx < 0 || idx >= me.length) return { ok: false as const, error: "Invalid board index" };
   const unit = me[idx];
   const foeSide: Side = side === "p1" ? "p2" : "p1";
   const foe = st.board[foeSide];
@@ -317,17 +331,17 @@ function doAttack(st: BattleState, side: Side, idx: number) {
     st.lastAction = { kind: "attackUnit", side, code: unit.code, target: t.code, dmg, coun: t.atk };
     if (t.hp <= 0) { foe.shift(); st.discard[foeSide].push(t.code); }
     if (unit.hp <= 0) { me.splice(idx, 1); st.discard[side].push(unit.code); }
-    return { ok: true, patch: { board: st.board, discard: st.discard, lastAction: st.lastAction } } as const;
+    return { ok: true as const, patch: { board: st.board, discard: st.discard, lastAction: st.lastAction } };
   } else {
     st.hero[foeSide] = Math.max(0, st.hero[foeSide] - dmg);
     st.lastAction = { kind: "attackHero", side, code: unit.code, dmg };
-    if (st.hero[foeSide] <= 0) return { ok: true, patch: { hero: st.hero, lastAction: st.lastAction }, winner: side } as const;
-    return { ok: true, patch: { hero: st.hero, lastAction: st.lastAction } } as const;
+    if (st.hero[foeSide] <= 0) return { ok: true as const, patch: { hero: st.hero, lastAction: st.lastAction }, winner: side };
+    return { ok: true as const, patch: { hero: st.hero, lastAction: st.lastAction } };
   }
 }
 
 function doEndPhase(st: BattleState, side: Side) {
-  if (st.phaseEnded[side]) return { ok: true } as const;
+  if (st.phaseEnded[side]) return { ok: true as const };
   st.phaseEnded[side] = true;
   st.lastAction = { kind: "endPhase", side, phaseNo: st.phaseNo };
 
@@ -339,26 +353,26 @@ function doEndPhase(st: BattleState, side: Side) {
     st.phaseEnded = { p1: false, p2: false };
     st.dice.p1 = rollDice(`${st.rngSeed}:phase:${st.phaseNo}:p1`, 10);
     st.dice.p2 = rollDice(`${st.rngSeed}:phase:${st.phaseNo}:p2`, 10);
-    // แจกการ์ดอื่น 4 ใบตอนขึ้น phase ใหม่
     st.hand.p1.push(...st.deck.p1.splice(0, 4));
     st.hand.p2.push(...st.deck.p2.splice(0, 4));
   }
-  return { ok: true, patch: { lastAction: st.lastAction, dice: st.dice, hand: st.hand, turn: st.turn } } as const;
+  return { ok: true as const, patch: { lastAction: st.lastAction, dice: st.dice, hand: st.hand, turn: st.turn } };
 }
 
-function applyAction(state: RoomState, side: Side, payload: any) {
-  if (state.phase !== "play") return { ok: false, error: "Game not started" } as const;
+function applyAction(state: RoomState, side: Side, payload: Payload) {
+  if (state.phase !== "play") return { ok: false as const, error: "Game not started" };
   const st = state as BattleState;
 
-  if (payload?.kind === "endPhase") return doEndPhase(st, side);
+  if (payload.kind === "endPhase") return doEndPhase(st, side);
 
-  if (st.turn !== side) return { ok: false, error: "Not your turn" } as const;
+  if (st.turn !== side) return { ok: false as const, error: "Not your turn" };
 
-  if (payload?.kind === "playCard") return doPlayCard(st, side, Number(payload.index ?? -1));
-  if (payload?.kind === "attack") return doAttack(st, side, Number(payload.index ?? -1));
-  if (payload?.kind === "endTurn") { endTurnAndPass(st); st.lastAction = { kind: "endTurn" }; return { ok: true, patch: { turn: st.turn, lastAction: st.lastAction, hand: st.hand } } as const; }
+  if (payload.kind === "playCard") return doPlayCard(st, side, Number(payload.index));
+  if (payload.kind === "attack") return doAttack(st, side, Number(payload.index));
+  if (payload.kind === "endTurn") { endTurnAndPass(st); st.lastAction = { kind: "endTurn" }; return { ok: true as const, patch: { turn: st.turn, lastAction: st.lastAction, hand: st.hand } }; }
 
-  return { ok: true, patch: { lastAction: payload } } as const;
+  // exhaustive check
+  return { ok: true as const, patch: { lastAction: payload } };
 }
 
 /* ===================== Route handlers ===================== */
@@ -371,9 +385,8 @@ export async function POST(req: Request) {
     await ensureCardStatsLoaded();
 
     let body: Body | null = null;
-    try { body = (await req.json()) as Body; } catch {}
-    if (!body || typeof (body as any).action !== "string")
-      return NextResponse.json({ ok: false, error: "BAD_BODY" }, { status: 400 });
+    try { body = (await req.json()) as Body; } catch { /* ignore */ }
+    if (!body) return NextResponse.json({ ok: false, error: "BAD_BODY" }, { status: 400 });
 
     if (body.action === "createRoom") {
       const { id, room } = getOrCreateRoom(body.roomId);
@@ -435,9 +448,9 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: true, full: true, state: room.state });
       }
 
-      const side =
+      const side: Side | undefined =
         body.side ??
-        (room.p1?.userId === body.userId ? "p1" : room.p2?.userId === body.userId ? "p2" : undefined);
+        (room.p1?.userId === (body.userId ?? "") ? "p1" : room.p2?.userId === (body.userId ?? "") ? "p2" : undefined);
       if (!side) return NextResponse.json({ ok: false, error: "SIDE_REQUIRED" }, { status: 400 });
 
       room.state.ready[side] = true;
@@ -464,11 +477,12 @@ export async function POST(req: Request) {
       if (res.patch && r.state.phase === "play") Object.assign(r.state, res.patch);
       rooms.set(r.id, r);
 
-      return NextResponse.json({ ok: true, patch: (res as any).patch ?? null, winner: (res as any).winner ?? null });
+      return NextResponse.json({ ok: true, patch: (res as { patch?: unknown }).patch ?? null, winner: (res as { winner?: Side }).winner ?? null });
     }
 
     return NextResponse.json({ ok: false, error: "UNKNOWN_ACTION" }, { status: 400 });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message ?? "SERVER_ERROR" }, { status: 500 });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "SERVER_ERROR";
+    return NextResponse.json({ ok: false, error: msg }, { status: 500 });
   }
 }

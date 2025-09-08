@@ -1,6 +1,6 @@
-import { createPool as mysqlCreatePool, Pool, PoolOptions } from "mysql2/promise";
+import { createPool as mysqlCreatePool, type Pool, type PoolOptions } from "mysql2/promise";
 
-/** กัน HMR/Hot-reload สร้าง pool ใหม่ */
+/** กันสร้าง Pool ซ้ำตอน hot-reload */
 declare global {
   // eslint-disable-next-line no-var
   var __MYSQL_POOL__: Pool | undefined;
@@ -15,10 +15,10 @@ export function getPool(): Pool {
     password: process.env.DB_PASS!,
     database: process.env.DB_NAME!,
     waitForConnections: true,
-    connectionLimit: 5,       // dev พอ 3–5 ก็พอ
+    connectionLimit: Number(process.env.MYSQL_CONN_LIMIT ?? 5),
     queueLimit: 0,
     enableKeepAlive: true,
-    keepAliveInitialDelay: 10000,
+    keepAliveInitialDelay: 10_000,
     multipleStatements: false,
   };
 

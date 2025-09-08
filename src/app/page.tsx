@@ -3,10 +3,11 @@
 import { useState, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { signIn, signOut, useSession } from "next-auth/react";
+import type { Session } from "next-auth";
 import Image from "next/image";
 
-/** เรียก API game */
-async function post<T = any>(body: unknown): Promise<T> {
+/** เรียก API game (generic, ไม่ใช้ any) */
+async function post<T>(body: unknown): Promise<T> {
   const res = await fetch("/api/game", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -20,10 +21,13 @@ async function post<T = any>(body: unknown): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-/** userId เสถียรทั้งแอป (เหมือนใน useGame.ts) */
-function stableUserId(session: any): string {
+/** userId เสถียรทั้งแอป */
+function stableUserId(session: Session | null | undefined): string {
   if (typeof window === "undefined") return "ssr";
-  const authId = (session?.user as any)?.id ?? session?.user?.email ?? null;
+  const authId =
+    session?.user?.id ??
+    session?.user?.email ??
+    null;
   if (authId) return String(authId);
   const key = "NOF_guestId";
   let id = localStorage.getItem(key);
@@ -38,6 +42,8 @@ function randRoom(len = 6) {
   return out;
 }
 
+type CreateJoinResponse = { ok: boolean; roomId: string };
+
 export default function Home() {
   const { data: session, status } = useSession();
   const router = useRouter();
@@ -46,7 +52,7 @@ export default function Home() {
   const [joinCode, setJoinCode] = useState<string>("");
 
   const user = useMemo(() => {
-    const id = stableUserId(session); // << ใช้เหมือน useGame
+    const id = stableUserId(session);
     return {
       userId: id,
       name: session?.user?.name ?? "Player",
@@ -57,25 +63,23 @@ export default function Home() {
   async function onCreate() {
     try {
       const roomId = (createCode || randRoom()).toUpperCase();
-      const res = await post<{ ok: boolean; roomId: string }>(
-        { action: "createRoom", roomId, user }
-      );
+      const res = await post<CreateJoinResponse>({ action: "createRoom", roomId, user });
       router.push(`/play/${res.roomId}`);
-    } catch (e: any) {
-      alert(`Create failed: ${e?.message || "unknown"}`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "unknown";
+      alert(`Create failed: ${msg}`);
     }
   }
 
   async function onJoin() {
     try {
       const roomId = (joinCode || "").trim().toUpperCase();
-      if (!roomId) return alert("กรอกรหัสห้องก่อนนะ");
-      const res = await post<{ ok: boolean; roomId: string }>(
-        { action: "joinRoom", roomId, user }
-      );
+      if (!roomId) { alert("กรอกรหัสห้องก่อนนะ"); return; }
+      const res = await post<CreateJoinResponse>({ action: "joinRoom", roomId, user });
       router.push(`/play/${res.roomId}`);
-    } catch (e: any) {
-      alert(`Join failed: ${e?.message || "unknown"}`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "unknown";
+      alert(`Join failed: ${msg}`);
     }
   }
 
@@ -87,7 +91,7 @@ export default function Home() {
       <section className="flex items-center gap-3">
         {status === "authenticated" ? (
           <>
-            {session.user?.image && (
+            {session?.user?.image && (
               <Image
                 src={session.user.image}
                 alt={session.user?.name ? `${session.user.name} avatar` : ""}
@@ -96,7 +100,7 @@ export default function Home() {
                 className="rounded-full"
               />
             )}
-            <span>{session.user?.name ?? "Discord User"}</span>
+            <span>{session?.user?.name ?? "Discord User"}</span>
             <button className="px-3 py-1 rounded bg-red-600" onClick={() => signOut()}>
               Logout
             </button>
