@@ -1,4 +1,4 @@
-// app/api/game/route.ts
+// src/app/api/game/route.ts
 import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import { getPool } from "@/lib/db";
@@ -396,8 +396,9 @@ export async function POST(req: Request) {
         const pool = getPool();
         const [rows] = await pool.query("SELECT 1 as ok");
         console.log(`[api/game][${reqId}] DB ping:`, rows);
-      } catch (e: any) {
-        console.error(`[api/game][${reqId}] DB_PING_FAIL:`, e?.message || e);
+      } catch (ex: unknown) {
+        const err = ex as Error;
+        console.error(`[api/game][${reqId}] DB_PING_FAIL:`, err.message || String(ex));
       }
     }
 
@@ -485,10 +486,11 @@ export async function POST(req: Request) {
     }
 
     return NextResponse.json({ ok: false, reqId, error: "UNKNOWN_ACTION" }, { status: 400 });
-  } catch (e: any) {
+  } catch (ex: unknown) {
     const ms = Date.now() - t0;
-    console.error(`[api/game][${reqId}] ERROR after ${ms}ms:`, e?.stack || e?.message || e);
-    const msg = e instanceof Error ? e.message : "SERVER_ERROR";
+    const err = ex as Error;
+    console.error(`[api/game][${reqId}] ERROR after ${ms}ms:`, err.stack || err.message || String(ex));
+    const msg = err instanceof Error ? err.message : "SERVER_ERROR";
     return NextResponse.json({ ok: false, reqId, error: msg }, { status: 500 });
   }
 }
