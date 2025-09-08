@@ -292,57 +292,58 @@ function SimpleCard({ code, meta }: { code: string; meta?: CardMeta }) {
 }
 
 /* ===================== Fallback meta hook ===================== */
+function fallbackMeta(code: string): CardMeta {
+  return {
+    code,
+    name: code.replaceAll("_", " "),
+    element: "Neutral",
+    attack: 0,
+    hp: 0,
+    ability: "",
+    cost: 0,
+    type: null,
+  };
+}
+
 function useCardMetaMap(allCodes: string[]) {
   const [meta, setMeta] = useState<CardMetaMap>({});
 
+  // ทำ key ที่เสถียร เพื่อลด noise ใน dependency
+  const codesKey = useMemo(() => {
+    const uniq = Array.from(new Set(allCodes)).sort();
+    return uniq.join(",");
+  }, [allCodes]);
+
   useEffect(() => {
-    if (!allCodes.length) return;
-    const wanted = Array.from(new Set(allCodes)); // unique list
+    if (!codesKey) return;
+    const wanted = codesKey.split(",").filter(Boolean);
+    let cancelled = false;
 
-    fetch(`/api/cards?codes=${encodeURIComponent(wanted.join(","))}`)
-      .then(async (r) => {
-        let data: unknown;
-        try { data = await r.json(); } catch { data = null; }
+    (async () => {
+      try {
+        const r = await fetch(`/api/cards?codes=${encodeURIComponent(wanted.join(","))}`);
+        const data: unknown = await r.json().catch(() => null);
 
-        const asOk = (val: unknown): val is { ok: boolean; cards: CardMeta[] } =>
-          typeof val === "object" && val !== null && "ok" in (val as Record<string, unknown>);
+        const isOk = (v: unknown): v is { ok: boolean; cards: CardMeta[] } =>
+          typeof v === "object" && v !== null && "ok" in (v as Record<string, unknown>);
 
         const map: CardMetaMap = {};
-        if (asOk(data) && Array.isArray((data as { cards: unknown }).cards)) {
+        if (isOk(data) && Array.isArray((data as { cards: unknown }).cards)) {
           for (const c of (data as { cards: CardMeta[] }).cards) map[c.code] = c;
         } else {
-          for (const code of wanted) {
-            map[code] = {
-              code,
-              name: code.replaceAll("_", " "),
-              element: "Neutral",
-              attack: 0,
-              hp: 0,
-              ability: "",
-              cost: 0,
-              type: null,
-            };
-          }
+          for (const code of wanted) map[code] = fallbackMeta(code);
         }
-        setMeta(map);
-      })
-      .catch(() => {
+
+        if (!cancelled) setMeta(map);
+      } catch {
         const map: CardMetaMap = {};
-        for (const code of wanted) {
-          map[code] = {
-            code,
-            name: code.replaceAll("_", " "),
-            element: "Neutral",
-            attack: 0,
-            hp: 0,
-            ability: "",
-            cost: 0,
-            type: null,
-          };
-        }
-        setMeta(map);
-      });
-  }, [JSON.stringify(allCodes)]);
+        for (const code of wanted) map[code] = fallbackMeta(code);
+        if (!cancelled) setMeta(map);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [codesKey]);
 
   return meta;
 }

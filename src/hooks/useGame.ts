@@ -35,6 +35,7 @@ type ServerStateLobby = {
   rngSeed?: string;
   lastAction?: unknown;
 };
+
 type ServerStatePlay = {
   phase: "play";
   turn: Side;
@@ -45,31 +46,37 @@ type ServerStatePlay = {
   hand?: Record<Side, string[]>;
   lastAction?: unknown;
 };
+
 type ServerState = ServerStateLobby | ServerStatePlay;
 
-type ApiStateResponse = { ok: boolean; state?: ServerState; players?: ServerPlayers };
+type ApiStateResponse = {
+  ok: boolean;
+  state?: ServerState;
+  players?: ServerPlayers;
+};
 
 function stableGuestId(): string {
   const key = "NOF_guestId";
   if (typeof window === "undefined") return "ssr";
   let id = localStorage.getItem(key);
-  if (!id) { id = crypto.randomUUID(); localStorage.setItem(key, id); }
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem(key, id);
+  }
   return id;
 }
-function useStableUser() {
+
+function useStableUserId(): string {
   const { data: session } = useSession();
-  const userId =
-    (session?.user as { id?: string | null } | undefined)?.id ??
-    session?.user?.email ??
-    stableGuestId();
-  return useMemo(() => ({
-    userId: String(userId),
-    name: session?.user?.name ?? "Player",
-    avatar: session?.user?.image ?? null,
-  }), [userId, session?.user?.name, session?.user?.image]);
+  return useMemo(() => {
+    const fromAuth =
+      (session?.user as { id?: string | null } | undefined)?.id ??
+      session?.user?.email ?? null;
+    return fromAuth ? String(fromAuth) : stableGuestId();
+  }, [session?.user]);
 }
 
-/** call /api/game แบบปลอดภัย */
+/** เรียก API แบบ type-safe ไม่มี any */
 async function post<T>(body: unknown): Promise<T> {
   const res = await fetch("/api/game", {
     method: "POST",
@@ -77,14 +84,11 @@ async function post<T>(body: unknown): Promise<T> {
     cache: "no-store",
     body: JSON.stringify(body),
   });
-  const text = await res.text().catch(() => "");
-  let json: any = null;
-  try { json = text ? JSON.parse(text) : null; } catch { /* noop */ }
   if (!res.ok) {
-    const msg = (json && json.error) ? json.error : (text || res.statusText);
-    throw new Error(msg);
+    const txt = await res.text().catch(() => "");
+    throw new Error(txt || res.statusText);
   }
-  return (json as T) ?? ({} as T);
+  return (await res.json()) as T;
 }
 
 /* ========= hook ========= */
@@ -101,13 +105,13 @@ type UseGameReturn = {
 };
 
 export function useGame(roomId: string): UseGameReturn {
-  const user = useStableUser();
+  const userId = useStableUserId();
 
   const [players, setPlayers] = useState<ServerPlayers>({ p1: null, p2: null });
   const [state, setState] = useState<ClientState | null>(null);
 
   const timer = useRef<number | null>(null);
-  const youSticky = useRef<Side | null>(null);
+  const youSticky = useRef<Side | null>(null); // ที่นั่งล่าสุด
 
   const pull = useCallback(async () => {
     try {
@@ -115,17 +119,19 @@ export function useGame(roomId: string): UseGameReturn {
       if (res.players) setPlayers(res.players);
 
       const s = res.state;
-      if (s?.phase === "lobby") {
+      if (!s) return;
+
+      if (s.phase === "lobby") {
         setState({
           mode: "lobby",
           ready: s.ready ?? { p1: false, p2: false },
-          rngSeed: (s as ServerStateLobby).rngSeed,
+          rngSeed: s.rngSeed,
           lastAction: s.lastAction,
         });
-      } else if (s?.phase === "play") {
+      } else if (s.phase === "play") {
         setState({
           mode: "play",
-          turn: (s as ServerStatePlay).turn,
+          turn: s.turn,
           phaseNo: s.phaseNo ?? 1,
           hero: s.hero ?? { p1: 30, p2: 30 },
           dice: s.dice ?? { p1: {}, p2: {} },
@@ -134,82 +140,92 @@ export function useGame(roomId: string): UseGameReturn {
           lastAction: s.lastAction,
         });
       }
-    } catch { /* เงียบ ๆ */ }
+    } catch {
+      // เงียบ ๆ ไปก่อน
+    }
   }, [roomId]);
 
+  // auto-poll
   useEffect(() => {
     pull();
     timer.current = window.setInterval(pull, 1200);
-    return () => { if (timer.current) window.clearInterval(timer.current); timer.current = null; };
+    return () => {
+      if (timer.current) window.clearInterval(timer.current);
+      timer.current = null;
+    };
   }, [pull]);
 
+  // you
   const computedYou: Side | null = useMemo(() => {
-    if (players.p1?.userId === user.userId) return "p1";
-    if (players.p2?.userId === user.userId) return "p2";
+    if (players.p1?.userId === userId) return "p1";
+    if (players.p2?.userId === userId) return "p2";
     return null;
-  }, [players, user.userId]);
+  }, [players, userId]);
 
-  useEffect(() => { if (computedYou) youSticky.current = computedYou; }, [computedYou]);
+  useEffect(() => {
+    if (computedYou) youSticky.current = computedYou;
+  }, [computedYou]);
+
   const you: Side | null = computedYou ?? youSticky.current ?? null;
 
-  // claim seat อัตโนมัติ (ส่ง user object)
+  // auto-join
   const join = useCallback(async () => {
     try {
       await post<{ ok: boolean }>({
         action: "joinRoom",
         roomId,
-        user, // <<< สำคัญสุด ๆ
+        user: { userId, name: null, avatar: null },
       });
     } finally {
       await pull();
     }
-  }, [roomId, user, pull]);
+  }, [roomId, userId, pull]);
 
   useEffect(() => {
-    const inSeat = players.p1?.userId === user.userId || players.p2?.userId === user.userId;
-    const hasSlot = !players.p1 || !players.p2;
-    if (!inSeat && hasSlot) void join();
-  }, [players, user.userId, join]);
+    const weAreIn = players.p1?.userId === userId || players.p2?.userId === userId;
+    const seatAvailable = !players.p1 || !players.p2;
+    if (!weAreIn && seatAvailable) void join();
+  }, [players, userId, join]);
 
   const ensureSide = useCallback(async (): Promise<Side> => {
     if (you === "p1" || you === "p2") return you;
     await join();
     const latest: Side | null =
-      players.p1?.userId === user.userId ? "p1" :
-      players.p2?.userId === user.userId ? "p2" : null;
+      players.p1?.userId === userId ? "p1" :
+      players.p2?.userId === userId ? "p2" : null;
     if (latest) return latest;
     throw new Error("Seat not assigned yet");
-  }, [you, join, players.p1?.userId, players.p2?.userId, user.userId]);
+  }, [you, join, players.p1?.userId, players.p2?.userId, userId]);
 
   const ready = useCallback(async () => {
     const side = await ensureSide();
-    await post<void>({ action: "ready", roomId, side, userId: user.userId });
+    await post<void>({ action: "ready", roomId, side, userId });
     await pull();
-  }, [ensureSide, pull, roomId, user.userId]);
+  }, [ensureSide, pull, roomId, userId]);
 
   const endTurn = useCallback(async () => {
     const side = await ensureSide();
-    await post<void>({ action: "action", roomId, side, payload: { kind: "endTurn" } });
+    await post<void>({ action: "action", roomId, side, userId, payload: { kind: "endTurn" } });
     await pull();
-  }, [ensureSide, pull, roomId]);
+  }, [ensureSide, pull, roomId, userId]);
 
   const endPhase = useCallback(async () => {
     const side = await ensureSide();
-    await post<void>({ action: "action", roomId, side, payload: { kind: "endPhase" } });
+    await post<void>({ action: "action", roomId, side, userId, payload: { kind: "endPhase" } });
     await pull();
-  }, [ensureSide, pull, roomId]);
+  }, [ensureSide, pull, roomId, userId]);
 
   const playCard = useCallback(async (index: number) => {
     const side = await ensureSide();
-    await post<void>({ action: "action", roomId, side, payload: { kind: "playCard", index } });
+    await post<void>({ action: "action", roomId, side, userId, payload: { kind: "playCard", index } });
     await pull();
-  }, [ensureSide, pull, roomId]);
+  }, [ensureSide, pull, roomId, userId]);
 
   const attackActive = useCallback(async (index = 0) => {
     const side = await ensureSide();
-    await post<void>({ action: "action", roomId, side, payload: { kind: "attack", index } });
+    await post<void>({ action: "action", roomId, side, userId, payload: { kind: "attack", index } });
     await pull();
-  }, [ensureSide, pull, roomId]);
+  }, [ensureSide, pull, roomId, userId]);
 
   return { you, players, state, ready, endTurn, endPhase, playCard, attackActive };
 }

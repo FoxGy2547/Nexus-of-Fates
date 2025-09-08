@@ -95,9 +95,6 @@ const authOptions: NextAuthOptions = {
           uid = String(rows[0].id);
         }
       } catch (err: unknown) {
-        // ไม่ throw ต่อ เพื่อไม่ให้ login พังเวลา DB งอแง
-        // และไม่ใช้ any
-        // eslint-disable-next-line no-console
         console.warn("[nextauth] DB skipped:", err);
       }
 
