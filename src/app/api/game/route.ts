@@ -1,8 +1,5 @@
-// src/app/api/game/route.ts
 import { NextResponse } from "next/server";
-import { randomUUID } from "node:crypto";
-import { getPool } from "@/lib/db";
-import type { RowDataPacket, ResultSetHeader } from "mysql2/promise";
+import { randomUUID } from "crypto";
 
 /* Next.js route config */
 export const runtime = "nodejs";
@@ -51,9 +48,10 @@ type RoomState = LobbyState | BattleState;
 type Room = {
   id: string;
   seed: string;
-  p1: PlayerInfo | null;
-  p2: PlayerInfo | null;
+  p1?: PlayerInfo;
+  p2?: PlayerInfo;
   state: RoomState;
+  __ts?: number; // last-touched timestamp (เพิ่มเพื่อ GC)
 };
 
 type Body =
@@ -67,7 +65,6 @@ type Body =
       action: "action";
       roomId: string;
       side: Side;
-      userId?: string;
       payload:
         | { kind: "playCard"; index: number }
         | { kind: "attack"; index: number }
@@ -75,6 +72,31 @@ type Body =
         | { kind: "endPhase" }
         | Record<string, unknown>;
     };
+
+/* ===================== In-memory store ===================== */
+declare global { var __NOF_ROOMS__: Map<string, Room> | undefined; }
+declare global { var __NOF_CARD_STATS__: Record<string, { atk:number; hp:number; element:Element; ability?:string; cost:number }> | undefined; }
+
+const rooms = globalThis.__NOF_ROOMS__ ?? new Map<string, Room>();
+globalThis.__NOF_ROOMS__ = rooms;
+
+let CARD_STATS =
+  globalThis.__NOF_CARD_STATS__ ?? (globalThis.__NOF_CARD_STATS__ = {} as Record<
+    string,
+    { atk: number; hp: number; element: Element; ability?: string; cost: number }
+  >);
+
+/* ===== touch + simple GC ===== */
+function touch(room: Room) { room.__ts = Date.now(); }
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, r] of rooms) {
+    const ts = r.__ts ?? 0;
+    if (now - ts > 30 * 60 * 1000) { // 30 นาที
+      rooms.delete(id);
+    }
+  }
+}, 10 * 60 * 1000); // สแกนทุก 10 นาที
 
 /* ===================== RNG & utils ===================== */
 function hashToSeed(s: string) {
@@ -96,7 +118,7 @@ function mulberry32(a: number) {
 function shuffle<T>(arr: T[], seed: string) {
   const rng = mulberry32(hashToSeed(seed));
   const a = arr.slice();
-  for (let i = a.length - 1; i > 0; i++) {
+  for (let i = a.length - 1; i > 0; i--) {
     const j = Math.floor(rng() * (i + 1));
     [a[i], a[j]] = [a[j], a[i]];
   }
@@ -116,91 +138,65 @@ function rollDice(seed: string, n = 10): DicePool {
 }
 
 /* ===================== Cards fallback ===================== */
-type CardStats = { atk: number; hp: number; element: Element; ability?: string; cost: number };
-const CARD_STATS: Record<string, CardStats> = {
-  BLAZE_KNIGHT: { element: "Pyro", atk: 5, hp: 4, cost: 3 },
-  FROST_ARCHER: { element: "Cryo", atk: 3, hp: 3, cost: 2 },
-  THUNDER_COLOSSUS: { element: "Electro", atk: 6, hp: 7, cost: 4 },
-  WINDBLADE_DUELIST: { element: "Anemo", atk: 3, hp: 2, cost: 1 },
-  STONE_BULWARK: { element: "Geo", atk: 2, hp: 6, cost: 2 },
-  TIDE_MAGE: { element: "Hydro", atk: 2, hp: 4, cost: 2 },
-  VOID_SEER: { element: "Quantum", atk: 4, hp: 3, cost: 3 },
-  MINDSHAPER: { element: "Imaginary", atk: 3, hp: 3, cost: 3 },
-  NEXUS_ADEPT: { element: "Neutral", atk: 2, hp: 2, cost: 1 },
-  ICE_WARDEN: { element: "Cryo", atk: 4, hp: 5, cost: 3 },
-  CINDER_SCOUT: { element: "Pyro", atk: 3, hp: 2, cost: 1 },
-  WAVECALLER: { element: "Hydro", atk: 2, hp: 5, cost: 2 },
-};
-
-/* ===================== DB helpers ===================== */
-type RoomRow = RowDataPacket & {
-  id: string;
-  seed: string;
-  p1: string | null;
-  p2: string | null;
-  state: string | null;
-};
-
-function parsePlayer(json: string | null): PlayerInfo | null {
-  if (!json) return null;
-  try { return JSON.parse(json) as PlayerInfo; } catch { return null; }
-}
-function parseState(json: string | null, seedFallback: string): RoomState {
-  if (!json) return newLobby(seedFallback);
-  try {
-    const st = JSON.parse(json) as RoomState;
-    if (!("phase" in st)) return newLobby(seedFallback);
-    return st;
-  } catch {
-    return newLobby(seedFallback);
-  }
-}
-
-async function loadRoom(roomId: string): Promise<Room> {
-  const pool = getPool();
-  const [rows] = await pool.query<RoomRow[]>(
-    "SELECT id, seed, p1, p2, state FROM rooms WHERE id=? LIMIT 1",
-    [roomId]
-  );
-  if (rows.length === 0) {
-    const seed = randomUUID();
-    const lobby = newLobby(seed);
-    await pool.query<ResultSetHeader>(
-      "INSERT INTO rooms (id, seed, p1, p2, state) VALUES (?, ?, NULL, NULL, ?)",
-      [roomId, seed, JSON.stringify(lobby)]
-    );
-    return { id: roomId, seed, p1: null, p2: null, state: lobby };
-  }
-  const r = rows[0];
-  return {
-    id: r.id,
-    seed: r.seed,
-    p1: parsePlayer(r.p1),
-    p2: parsePlayer(r.p2),
-    state: parseState(r.state, r.seed),
+if (!Object.keys(CARD_STATS).length) {
+  const f = (e: Element, atk: number, hp: number, cost: number) => ({ element: e, atk, hp, cost });
+  CARD_STATS = {
+    BLAZE_KNIGHT: f("Pyro", 5, 4, 3),
+    FROST_ARCHER: f("Cryo", 3, 3, 2),
+    THUNDER_COLOSSUS: f("Electro", 6, 7, 4),
+    WINDBLADE_DUELIST: f("Anemo", 3, 2, 1),
+    STONE_BULWARK: f("Geo", 2, 6, 2),
+    TIDE_MAGE: f("Hydro", 2, 4, 2),
+    VOID_SEER: f("Quantum", 4, 3, 3),
+    MINDSHAPER: f("Imaginary", 3, 3, 3),
+    NEXUS_ADEPT: f("Neutral", 2, 2, 1),
+    ICE_WARDEN: f("Cryo", 4, 5, 3),
+    CINDER_SCOUT: f("Pyro", 3, 2, 1),
+    WAVECALLER: f("Hydro", 2, 5, 2),
   };
+  globalThis.__NOF_CARD_STATS__ = CARD_STATS;
 }
 
-async function saveRoom(room: Room): Promise<void> {
-  const pool = getPool();
-  await pool.query<ResultSetHeader>(
-    "UPDATE rooms SET seed=?, p1=?, p2=?, state=? WHERE id=?",
-    [
-      room.seed,
-      room.p1 ? JSON.stringify(room.p1) : null,
-      room.p2 ? JSON.stringify(room.p2) : null,
-      JSON.stringify(room.state),
-      room.id,
-    ]
-  );
-}
-
-/* ===================== Room & gameplay helpers ===================== */
+/* ===================== Room helpers ===================== */
 function newLobby(seed: string): LobbyState {
   return { phase: "lobby", ready: { p1: false, p2: false }, rngSeed: seed, lastAction: null };
 }
+function getOrCreateRoom(roomId?: string) {
+  const id = (roomId || randomUUID().slice(0, 6)).toUpperCase();
+  if (!rooms.has(id)) {
+    const seed = randomUUID();
+    rooms.set(id, { id, seed, state: newLobby(seed), __ts: Date.now() });
+  }
+  const room = rooms.get(id)!;
+  touch(room);
+  rooms.set(id, room);
+  return { id, room };
+}
 function isLobby(st: RoomState): st is LobbyState { return st.phase === "lobby"; }
+function isPlay(st: RoomState): st is BattleState { return st.phase === "play"; }
 
+function sanitize(room: Room) {
+  if (!room.state || !("phase" in room.state)) room.state = newLobby(room.seed);
+  if (room.p1 && !room.p1.userId) room.p1 = undefined;
+  if (room.p2 && !room.p2.userId) room.p2 = undefined;
+  if (room.p1?.userId && room.p2?.userId && room.p1.userId === room.p2.userId) {
+    room.p2 = undefined;
+    if (isLobby(room.state)) room.state.ready.p2 = false;
+  }
+}
+
+/** ผู้สร้างห้อง = p1 เสมอ */
+function forceSitP1(room: Room, user: PlayerInfo) {
+  sanitize(room);
+  room.p1 = { ...user };
+  if (room.p2?.userId === user.userId) {
+    room.p2 = undefined;
+    if (isLobby(room.state)) room.state.ready.p2 = false;
+  }
+  touch(room);
+}
+
+/* ===================== Start / Phase / Turn ===================== */
 function startPlayFromLobby(lobby: LobbyState): BattleState {
   const seed = lobby.rngSeed;
 
@@ -259,6 +255,7 @@ function endTurnAndPass(st: BattleState) {
   startTurn(st, next);
 }
 
+/* ===================== Basic actions ===================== */
 function doPlayCard(st: BattleState, side: Side, index: number) {
   const hand = st.hand[side];
   if (index < 0 || index >= hand.length) return { ok: false, error: "Invalid hand index" } as const;
@@ -321,13 +318,10 @@ function doEndPhase(st: BattleState, side: Side) {
     st.phaseStarter = side;
     st.turn = st.phaseStarter;
     st.phaseEnded = { p1: false, p2: false };
-
     st.dice.p1 = rollDice(`${st.rngSeed}:phase:${st.phaseNo}:p1`, 10);
     st.dice.p2 = rollDice(`${st.rngSeed}:phase:${st.phaseNo}:p2`, 10);
-
-    (["p1", "p2"] as const).forEach(s => {
-      st.hand[s].push(...st.deck[s].splice(0, 4));
-    });
+    st.hand.p1.push(...st.deck.p1.splice(0, 4));
+    st.hand.p2.push(...st.deck.p2.splice(0, 4));
   }
   return { ok: true, patch: { lastAction: st.lastAction, dice: st.dice, hand: st.hand, turn: st.turn } } as const;
 }
@@ -341,16 +335,18 @@ function applyAction(state: RoomState, side: Side, payload: unknown): ApplyRes {
   if (state.phase !== "play") return { ok: false, error: "Game not started" };
   const st = state as BattleState;
 
-  const p = payload as { kind?: string; index?: number };
-  if (p.kind === "endPhase") return doEndPhase(st, side);
-  if (st.turn !== side && p.kind !== "endPhase") return { ok: false, error: "Not your turn" };
+  if (typeof payload === "object" && payload !== null && (payload as Record<string, unknown>).kind === "endPhase") {
+    return doEndPhase(st, side);
+  }
 
+  if (st.turn !== side) return { ok: false, error: "Not your turn" };
+
+  const p = payload as Record<string, unknown>;
   if (p.kind === "playCard") return doPlayCard(st, side, Number(p.index ?? -1));
   if (p.kind === "attack") return doAttack(st, side, Number(p.index ?? -1));
   if (p.kind === "endTurn") { endTurnAndPass(st); st.lastAction = { kind: "endTurn" }; return { ok: true, patch: { turn: st.turn, lastAction: st.lastAction, hand: st.hand } }; }
 
-  st.lastAction = payload as unknown;
-  return { ok: true, patch: { lastAction: st.lastAction } };
+  return { ok: true, patch: { lastAction: payload as unknown } };
 }
 
 /* ===================== Route handlers ===================== */
@@ -362,114 +358,100 @@ function hasActionField(v: unknown): v is { action: Body["action"] } {
   return typeof v === "object" && v !== null && typeof (v as Record<string, unknown>).action === "string";
 }
 
-function envOk() {
-  return !!(process.env.DB_HOST && process.env.DB_USER && process.env.DB_NAME);
-}
-
 export async function POST(req: Request) {
-  const reqId = randomUUID();
-  const t0 = Date.now();
   try {
-    const url = new URL(req.url);
-    const diag = url.searchParams.get("diag") === "1";
-
-    const rawText = await req.text();
-    let raw: unknown = null;
-    try { raw = rawText ? JSON.parse(rawText) : null; } catch {
-      console.error(`[api/game][${reqId}] BAD_JSON body=`, rawText?.slice(0, 500));
-      return NextResponse.json({ ok: false, reqId, error: "BAD_JSON" }, { status: 400 });
-    }
-
-    console.log(`[api/game][${reqId}] start ua="${req.headers.get("user-agent")}" ip="${req.headers.get("x-forwarded-for") || "?"}" env=${envOk() ? "ok" : "missing"}`);
-
+    const raw = await req.json().catch(() => null);
     if (!hasActionField(raw)) {
-      return NextResponse.json({ ok: false, reqId, error: "BAD_BODY" }, { status: 400 });
+      return NextResponse.json({ ok: false, error: "BAD_BODY" }, { status: 400 });
     }
     const body = raw as Body;
 
-    if (!envOk()) {
-      throw new Error("ENV_MISSING: DB_HOST/DB_USER/DB_NAME not set");
-    }
-
-    if (diag) {
-      try {
-        const pool = getPool();
-        const [rows] = await pool.query("SELECT 1 as ok");
-        console.log(`[api/game][${reqId}] DB ping:`, rows);
-      } catch (ex: unknown) {
-        const err = ex as Error;
-        console.error(`[api/game][${reqId}] DB_PING_FAIL:`, err.message || String(ex));
-      }
-    }
-
     if (body.action === "createRoom") {
-      const roomId = (body.roomId || randomUUID().slice(0, 6)).toUpperCase();
-      const room = await loadRoom(roomId);
-      room.p1 = body.user;
-      room.p2 = room.p2 ?? null;
-      room.state = isLobby(room.state) ? room.state : newLobby(room.seed);
-      await saveRoom(room);
-      const ms = Date.now() - t0;
-      console.log(`[api/game][${reqId}] createRoom ${roomId} in ${ms}ms`);
-      return NextResponse.json({ ok: true, reqId, roomId, you: "p1" as const, players: { p1: room.p1, p2: room.p2 }, state: room.state });
+      const { id, room } = getOrCreateRoom(body.roomId);
+      forceSitP1(room, body.user);
+      rooms.set(id, room); touch(room);
+      return NextResponse.json({
+        ok: true,
+        roomId: id,
+        you: "p1" as const,
+        players: { p1: room.p1 ?? null, p2: room.p2 ?? null },
+        state: room.state,
+      });
     }
 
     if (body.action === "joinRoom") {
-      const roomId = body.roomId.toUpperCase();
-      const room = await loadRoom(roomId);
-      if (!room.p1) {
-        room.p1 = body.user;
-      } else if (!room.p2) {
-        room.p2 = body.user;
-      } else {
-        if (room.p1.userId === body.user.userId) room.p1 = body.user;
-        else if (room.p2.userId === body.user.userId) room.p2 = body.user;
-        else return NextResponse.json({ ok: false, reqId, error: "ROOM_FULL" }, { status: 400 });
+      const { id, room } = getOrCreateRoom(body.roomId);
+      sanitize(room);
+
+      if (room.p1?.userId === body.user.userId) {
+        room.p1 = body.user; rooms.set(id, room); touch(room);
+        return NextResponse.json({ ok: true, roomId: id, you: "p1", players: { p1: room.p1 ?? null, p2: room.p2 ?? null }, state: room.state });
       }
-      await saveRoom(room);
-      const you: Side = room.p1?.userId === body.user.userId ? "p1" : "p2";
-      const ms = Date.now() - t0;
-      console.log(`[api/game][${reqId}] joinRoom ${roomId} as ${you} in ${ms}ms`);
-      return NextResponse.json({ ok: true, reqId, roomId, you, players: { p1: room.p1, p2: room.p2 }, state: room.state });
+      if (room.p2?.userId === body.user.userId) {
+        room.p2 = body.user; rooms.set(id, room); touch(room);
+        return NextResponse.json({ ok: true, roomId: id, you: "p2", players: { p1: room.p1 ?? null, p2: room.p2 ?? null }, state: room.state });
+      }
+
+      if (!room.p2) {
+        room.p2 = body.user; rooms.set(id, room); touch(room);
+        return NextResponse.json({ ok: true, roomId: id, you: "p2", players: { p1: room.p1 ?? null, p2: room.p2 ?? null }, state: room.state });
+      }
+      if (!room.p1) {
+        room.p1 = body.user; rooms.set(id, room); touch(room);
+        return NextResponse.json({ ok: true, roomId: id, you: "p1", players: { p1: room.p1 ?? null, p2: room.p2 ?? null }, state: room.state });
+      }
+
+      return NextResponse.json({ ok: false, error: "ROOM_FULL" }, { status: 400 });
     }
 
     if (body.action === "leave") {
-      const room = await loadRoom(body.roomId);
-      if (room.p1?.userId === body.userId) { room.p1 = null; if (isLobby(room.state)) room.state.ready.p1 = false; }
-      if (room.p2?.userId === body.userId) { room.p2 = null; if (isLobby(room.state)) room.state.ready.p2 = false; }
-      await saveRoom(room);
-      return NextResponse.json({ ok: true, reqId });
+      const r = rooms.get(body.roomId);
+      if (!r) return NextResponse.json({ ok: true });
+      if (r.p1?.userId === body.userId) { r.p1 = undefined; if (isLobby(r.state)) r.state.ready.p1 = false; }
+      if (r.p2?.userId === body.userId) { r.p2 = undefined; if (isLobby(r.state)) r.state.ready.p2 = false; }
+      sanitize(r); rooms.set(r.id, r); touch(r);
+      return NextResponse.json({ ok: true });
     }
 
     if (body.action === "players") {
-      const room = await loadRoom(body.roomId);
-      return NextResponse.json({ ok: true, reqId, players: { p1: room.p1, p2: room.p2 } });
+      const { room } = getOrCreateRoom(body.roomId);
+      sanitize(room); touch(room);
+      return NextResponse.json({ ok: true, players: { p1: room.p1 ?? null, p2: room.p2 ?? null } });
     }
 
     if (body.action === "state") {
-      const room = await loadRoom(body.roomId);
-      return NextResponse.json({ ok: true, reqId, state: room.state, players: { p1: room.p1, p2: room.p2 } });
+      const { room } = getOrCreateRoom(body.roomId);
+      sanitize(room); touch(room);
+      return NextResponse.json({
+        ok: true,
+        state: room.state,
+        players: { p1: room.p1 ?? null, p2: room.p2 ?? null },
+      });
     }
 
     if (body.action === "ready") {
-      const room = await loadRoom(body.roomId);
+      const { room } = getOrCreateRoom(body.roomId);
+      sanitize(room);
+
       if (!isLobby(room.state)) {
-        return NextResponse.json({ ok: true, reqId, full: true, state: room.state });
+        touch(room);
+        return NextResponse.json({ ok: true, full: true, state: room.state });
       }
+
       const side: Side | undefined =
-        body.side ?? (room.p1?.userId ? "p2" : "p1");
-      if (!side) return NextResponse.json({ ok: false, reqId, error: "SIDE_REQUIRED" }, { status: 400 });
+        body.side ??
+        (room.p1?.userId === body.userId ? "p1" : room.p2?.userId === body.userId ? "p2" : undefined);
+      if (!side) return NextResponse.json({ ok: false, error: "SIDE_REQUIRED" }, { status: 400 });
 
       room.state.ready[side] = true;
 
       if (room.p1 && room.p2 && room.state.ready.p1 && room.state.ready.p2) {
         room.state = startPlayFromLobby(room.state);
       }
-      await saveRoom(room);
+      rooms.set(room.id, room); touch(room);
       const full = room.state.phase === "play";
       return NextResponse.json({
         ok: true,
-        reqId,
         full,
         state: room.state,
         patch: full ? undefined : { ready: (room.state as LobbyState).ready },
@@ -477,20 +459,20 @@ export async function POST(req: Request) {
     }
 
     if (body.action === "action") {
-      const room = await loadRoom(body.roomId);
-      const res = applyAction(room.state, body.side, body.payload);
-      if (!res.ok) return NextResponse.json({ ...res, reqId }, { status: 400 });
-      if (res.patch && room.state.phase === "play") Object.assign(room.state, res.patch);
-      await saveRoom(room);
-      return NextResponse.json({ ok: true, reqId, patch: res.patch ?? null, winner: res.winner ?? null });
+      const r = rooms.get(body.roomId);
+      if (!r) return NextResponse.json({ ok: false, error: "ROOM_NOT_FOUND" }, { status: 404 });
+
+      const res = applyAction(r.state, body.side, body.payload);
+      if (!res.ok) return NextResponse.json(res, { status: 400 });
+      if (res.patch && isPlay(r.state)) Object.assign(r.state, res.patch);
+      rooms.set(r.id, r); touch(r);
+
+      return NextResponse.json({ ok: true, patch: res.patch ?? null, winner: res.winner ?? null });
     }
 
-    return NextResponse.json({ ok: false, reqId, error: "UNKNOWN_ACTION" }, { status: 400 });
-  } catch (ex: unknown) {
-    const ms = Date.now() - t0;
-    const err = ex as Error;
-    console.error(`[api/game][${reqId}] ERROR after ${ms}ms:`, err.stack || err.message || String(ex));
-    const msg = err instanceof Error ? err.message : "SERVER_ERROR";
-    return NextResponse.json({ ok: false, reqId, error: msg }, { status: 500 });
+    return NextResponse.json({ ok: false, error: "UNKNOWN_ACTION" }, { status: 400 });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "SERVER_ERROR";
+    return NextResponse.json({ ok: false, error: msg }, { status: 500 });
   }
 }
