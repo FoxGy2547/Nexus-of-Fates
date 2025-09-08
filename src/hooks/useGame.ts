@@ -1,151 +1,205 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSession } from "next-auth/react";
 
-/* ===== shared types (ซิงค์กับฝั่ง server) ===== */
-export type Side = "p1" | "p2";
-export type Element =
-  | "Pyro" | "Hydro" | "Cryo" | "Electro"
-  | "Geo" | "Anemo" | "Quantum" | "Imaginary" | "Neutral";
+/* ========= shared types (ให้สั้นและไม่ผูกกับฝั่ง server มากเกินไป) ========= */
+type Side = "p1" | "p2";
+type DicePool = Record<string, number>;
 
-export type DicePool = Record<Element, number>;
-export type UnitVM = { code: string; attack: number; hp: number; element: string };
+type UnitVM = { code: string; attack: number; hp: number; element: string };
 
-export type ClientState = {
-  mode?: "lobby" | "play";
-  turn: Side;
-  phaseNo?: number;
-  hero: Record<Side, number>;
-  dice: Record<Side, DicePool>;
-  board: Record<Side, UnitVM[]>;
-  hand: Record<Side, string[]>;
-  ready?: { p1: boolean; p2: boolean };
-};
+type ClientState =
+  | {
+      mode: "lobby";
+      ready: { p1: boolean; p2: boolean };
+      rngSeed?: string;
+      lastAction?: unknown;
+    }
+  | {
+      mode: "play";
+      turn: Side;
+      phaseNo: number;
+      hero: Record<Side, number>;
+      dice: Record<Side, DicePool>;
+      board: Record<Side, UnitVM[]>;
+      hand: Record<Side, string[]>;
+      lastAction?: unknown;
+    };
 
-export type PlayerInfo = { userId: string; name?: string | null; avatar?: string | null };
-export type PlayersVM = {
-  p1: PlayerInfo | null;
-  p2: PlayerInfo | null;
-};
+type PlayerInfo = { userId: string; name?: string | null; avatar?: string | null } | null;
 
-type ApiOk<T> = { ok: true } & T;
-type ApiErr = { ok: false; error: string };
+/* ========= utils ========= */
 
-type JoinRes = ApiOk<{ roomId: string; you: Side; players: PlayersVM; state: unknown }>;
-type StateRes = ApiOk<{ state: unknown; players: PlayersVM }>;
-
-function isBattleState(s: unknown): s is ClientState {
-  // รับกึ่ง ๆ พอใช้ render — ไม่ต้อง strict เกิน
-  if (!s || typeof s !== "object") return false;
-  const st = s as Record<string, unknown>;
-  return "turn" in st && "hero" in st && "dice" in st && "board" in st && "hand" in st;
+function stableGuestId(): string {
+  const key = "NOF_guestId";
+  if (typeof window === "undefined") return "ssr";
+  let id = localStorage.getItem(key);
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem(key, id);
+  }
+  return id;
 }
 
-export function useGame(roomId: string) {
-  const [you, setYou] = useState<Side | null>(null);
-  const [players, setPlayers] = useState<PlayersVM>({ p1: null, p2: null });
+/** userId เสถียร: ถ้ามี next-auth ใช้อันนั้น ไม่งั้นใช้ guestId */
+function useStableUserId(): string {
+  const { data: session } = useSession();
+  return useMemo(() => {
+    const fromAuth =
+      (session?.user as { id?: string | null } | undefined)?.id ??
+      session?.user?.email ??
+      null;
+    return fromAuth ? String(fromAuth) : stableGuestId();
+  }, [session?.user]);
+}
+
+async function post<T>(body: unknown): Promise<T> {
+  const res = await fetch("/api/game", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    cache: "no-store",
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(txt || res.statusText);
+  }
+  return res.json() as Promise<T>;
+}
+
+/* ========= hook หลัก ========= */
+
+type UseGameReturn = {
+  you: Side | null; // ที่นั่งของเรา (ถ้าแมตช์ userId ไม่ได้จะเป็น null)
+  players: { p1: PlayerInfo; p2: PlayerInfo };
+  state: ClientState | null;
+
+  // actions
+  ready: () => Promise<void>;
+  endTurn: () => Promise<void>;
+  endPhase: () => Promise<void>;
+  playCard: (index: number) => Promise<void>;
+  attackActive: (index?: number) => Promise<void>;
+};
+
+export function useGame(roomId: string): UseGameReturn {
+  const userId = useStableUserId();
+
+  const [players, setPlayers] = useState<{ p1: PlayerInfo; p2: PlayerInfo }>({
+    p1: null,
+    p2: null,
+  });
   const [state, setState] = useState<ClientState | null>(null);
 
-  const roomRef = useRef(roomId);
-  roomRef.current = roomId;
+  const timer = useRef<number | null>(null);
 
-  // join room ทันที
-  useEffect(() => {
-    let aborted = false;
-
-    async function join() {
-      const res = await fetch("/api/game", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "joinRoom", roomId, user: { userId: "local", name: "You" } }),
-      });
-
-      const data: JoinRes | ApiErr = await res.json();
-      if (aborted) return;
-
-      if ("ok" in data && data.ok) {
-        setYou(data.you);
-        setPlayers(data.players);
-        if (isBattleState(data.state)) {
-          setState(data.state);
-        } else {
-          // แปลงเป็น ClientState โหมด lobby ให้พอ render
+  // polling เฉพาะ state / players — ไม่ auto-join
+  const pull = useCallback(async () => {
+    try {
+      const res = await post<{
+        ok: boolean;
+        state?: any;
+        players?: { p1: PlayerInfo; p2: PlayerInfo };
+      }>({ action: "state", roomId });
+      if (res?.players) setPlayers(res.players);
+      if (res?.state) {
+        // map ให้เป็น ClientState แบบ client
+        const s = res.state as any;
+        if (s?.phase === "lobby") {
           setState({
             mode: "lobby",
-            turn: "p1",
-            phaseNo: 1,
-            hero: { p1: 30, p2: 30 },
-            dice: { p1: {} as DicePool, p2: {} as DicePool },
-            board: { p1: [], p2: [] },
-            hand: { p1: [], p2: [] },
-            ready: { p1: false, p2: false },
+            ready: s.ready ?? { p1: false, p2: false },
+            rngSeed: s.rngSeed,
+            lastAction: s.lastAction,
+          });
+        } else if (s?.phase === "play") {
+          setState({
+            mode: "play",
+            turn: s.turn,
+            phaseNo: s.phaseNo ?? 1,
+            hero: s.hero ?? { p1: 30, p2: 30 },
+            dice: s.dice ?? { p1: {}, p2: {} },
+            board: s.board ?? { p1: [], p2: [] },
+            hand: s.hand ?? { p1: [], p2: [] },
+            lastAction: s.lastAction,
           });
         }
       }
+    } catch {
+      // เงียบ ๆ ไปก่อน
     }
-
-    join().catch(() => undefined);
-    return () => { aborted = true; };
   }, [roomId]);
 
-  // pull state ช่วง ๆ (simple polling)
   useEffect(() => {
-    let timer: number | null = null;
-    let stopped = false;
-
-    const tick = async () => {
-      try {
-        const res = await fetch("/api/game", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "state", roomId: roomRef.current }),
-        });
-        const data: StateRes | ApiErr = await res.json();
-        if (!stopped && "ok" in data && data.ok && isBattleState(data.state)) {
-          setState(data.state);
-          setPlayers(data.players);
-        }
-      } catch {
-        // เงียบ ๆ
-      } finally {
-        if (!stopped) {
-          timer = window.setTimeout(tick, 1000);
-        }
-      }
-    };
-
-    timer = window.setTimeout(tick, 300);
+    pull(); // ดึงทันที
+    timer.current = window.setInterval(pull, 1200);
     return () => {
-      stopped = true;
-      if (timer) window.clearTimeout(timer);
+      if (timer.current) window.clearInterval(timer.current);
+      timer.current = null;
     };
-  }, []);
+  }, [pull]);
 
-  /* ===== action helpers ===== */
-  const call = useCallback(async (payload: unknown) => {
-    if (!you) return null;
-    const res = await fetch("/api/game", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "action", roomId: roomRef.current, side: you, payload }),
-    });
-    type ActionRes = ApiOk<{ patch: unknown; winner: Side | null }> | ApiErr;
-    const data: ActionRes = await res.json();
-    return data;
+  // ระบุ "you" จากการแมตช์ userId ของเราเข้ากับ players
+  const you: Side | null = useMemo(() => {
+    if (players.p1?.userId === userId) return "p1";
+    if (players.p2?.userId === userId) return "p2";
+    return null;
+  }, [players, userId]);
+
+  /* ===== actions ===== */
+
+  const ensureSide = useCallback((): Side => {
+    if (you === "p1" || you === "p2") return you;
+    // ถ้าแมตช์ไม่ได้ ให้เดาว่า p1 (ใช้กับ lobby/ready)
+    return "p1";
   }, [you]);
 
   const ready = useCallback(async () => {
-    await fetch("/api/game", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "ready", roomId: roomRef.current, userId: "local" }),
-    });
-  }, []);
+    const side = ensureSide();
+    await post({ action: "ready", roomId, side });
+    await pull();
+  }, [ensureSide, pull, roomId]);
 
-  const endTurn = useCallback(() => call({ kind: "endTurn" }), [call]);
-  const endPhase = useCallback(() => call({ kind: "endPhase" }), [call]);
-  const playCard = useCallback((index: number) => call({ kind: "playCard", index }), [call]);
-  const attackActive = useCallback((index = 0) => call({ kind: "attack", index }), [call]);
+  const endTurn = useCallback(async () => {
+    const side = ensureSide();
+    await post({ action: "action", roomId, side, payload: { kind: "endTurn" } });
+    await pull();
+  }, [ensureSide, pull, roomId]);
+
+  const endPhase = useCallback(async () => {
+    const side = ensureSide();
+    await post({ action: "action", roomId, side, payload: { kind: "endPhase" } });
+    await pull();
+  }, [ensureSide, pull, roomId]);
+
+  const playCard = useCallback(
+    async (index: number) => {
+      const side = ensureSide();
+      await post({
+        action: "action",
+        roomId,
+        side,
+        payload: { kind: "playCard", index },
+      });
+      await pull();
+    },
+    [ensureSide, pull, roomId]
+  );
+
+  const attackActive = useCallback(
+    async (index = 0) => {
+      const side = ensureSide();
+      await post({
+        action: "action",
+        roomId,
+        side,
+        payload: { kind: "attack", index },
+      });
+      await pull();
+    },
+    [ensureSide, pull, roomId]
+  );
 
   return { you, players, state, ready, endTurn, endPhase, playCard, attackActive };
 }
