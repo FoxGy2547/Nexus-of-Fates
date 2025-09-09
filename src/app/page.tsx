@@ -35,6 +35,17 @@ async function post<T>(body: unknown): Promise<T> {
   return (json as T) ?? ({} as T);
 }
 
+/** สุ่มไอดีแบบ type-safe (ถ้ามี crypto.randomUUID ก็ใช้ ไม่งั้น fallback) */
+function safeRandomId(): string {
+  if (typeof globalThis !== "undefined" && "crypto" in globalThis) {
+    const c = (globalThis as { crypto?: Crypto }).crypto;
+    if (c && typeof c.randomUUID === "function") {
+      return c.randomUUID();
+    }
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 /** userId เสถียรทั้งแอป (auth > email > guestId); การันตีคืนค่า string เสมอ */
 function stableUserId(session: Session | null | undefined): string {
   if (typeof window === "undefined") return "ssr";
@@ -50,9 +61,7 @@ function stableUserId(session: Session | null | undefined): string {
   if (existing) return existing; // เป็น string แน่นอน
 
   // สร้าง guest id ใหม่ แล้วบันทึก
-  const rnd =
-    (globalThis.crypto as any)?.randomUUID?.() ??
-    `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const rnd = safeRandomId();
   localStorage.setItem(key, rnd);
   return rnd;
 }

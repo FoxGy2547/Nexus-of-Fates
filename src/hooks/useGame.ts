@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSession } from "next-auth/react";
 import type { Session } from "next-auth";
 
-/* ===================== helper ===================== */
+/* ===================== helpers ===================== */
 async function post<T>(body: unknown): Promise<T> {
   const res = await fetch("/api/game", {
     method: "POST",
@@ -31,6 +31,17 @@ async function post<T>(body: unknown): Promise<T> {
   return (json as T) ?? ({} as T);
 }
 
+/** สุ่มไอดีแบบ type-safe (ใช้ crypto.randomUUID ถ้ามี) */
+function safeRandomId(): string {
+  if (typeof globalThis !== "undefined" && "crypto" in globalThis) {
+    const c = (globalThis as { crypto?: Crypto }).crypto;
+    if (c && typeof c.randomUUID === "function") {
+      return c.randomUUID();
+    }
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 /** เสถียรทั้งแอป: auth.id > email > guestId (localStorage) */
 function stableUserId(session: Session | null | undefined): string {
   if (typeof window === "undefined") return "ssr";
@@ -43,10 +54,7 @@ function stableUserId(session: Session | null | undefined): string {
   const key = "NOF_guestId";
   let id = localStorage.getItem(key);
   if (!id) {
-    const rnd =
-      (crypto as any)?.randomUUID?.() ??
-      `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    id = String(rnd);
+    id = safeRandomId();
     localStorage.setItem(key, id);
   }
   return id;
@@ -75,7 +83,7 @@ export type ClientState = {
   hand: Record<Side, string[]>;
   ready?: { p1: boolean; p2: boolean };
   players?: Partial<Record<Side, { name?: string | null; avatar?: string | null }>>;
-  you?: Side; // 👈 เซิร์ฟเวอร์บอกฝั่งเรา
+  you?: Side; // เซิร์ฟเวอร์บอกฝั่งเรา
 };
 
 /* ===================== the hook ===================== */
@@ -106,23 +114,20 @@ export function useGame(roomIdRaw: string) {
 
   // handshake ให้แน่ใจว่า API พร้อม
   useEffect(() => {
-    post<{ ok: boolean; time: number }>({ action: "hello" }).catch(() => {});
+    void post<{ ok: boolean; time: number }>({ action: "hello" }).catch(() => undefined);
   }, []);
 
-  // 🔗 เข้าร่วมห้องอัตโนมัติ (ครั้งเดียว)
+  // เข้าร่วมห้องอัตโนมัติ (ครั้งเดียว/ต่อ roomId)
   const joinedRef = useRef(false);
   useEffect(() => {
     if (!roomId || joinedRef.current) return;
-    post<{ ok: boolean; roomId: string }>({
+    joinedRef.current = true;
+    void post<{ ok: boolean; roomId: string }>({
       action: "joinRoom",
       roomId,
       user, // { userId, name, avatar }
-    })
-      .catch(() => {})
-      .finally(() => {
-        joinedRef.current = true;
-      });
-  }, [roomId, user.userId]); // eslint-disable-line react-hooks/exhaustive-deps
+    }).catch(() => undefined);
+  }, [roomId, user]);
 
   // pull state แบบ polling
   const pollingRef = useRef<number | null>(null);
@@ -139,7 +144,7 @@ export function useGame(roomIdRaw: string) {
       // ถ้า server บอก you → ตั้ง role ให้ทันที
       const you = res.state.you;
       if (you) {
-        const r = you === "p1" ? "host" : "player";
+        const r: "host" | "player" = you === "p1" ? "host" : "player";
         if (role !== r) {
           setRole(r);
           if (typeof window !== "undefined") {
@@ -154,11 +159,15 @@ export function useGame(roomIdRaw: string) {
 
   useEffect(() => {
     if (!roomId) return;
-    pull(); // ครั้งแรก
-    pollingRef.current && clearInterval(pollingRef.current);
+    void pull(); // ครั้งแรก
+    if (pollingRef.current) {
+      clearInterval(pollingRef.current);
+    }
     pollingRef.current = window.setInterval(pull, 900);
     return () => {
-      pollingRef.current && clearInterval(pollingRef.current);
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+      }
       pollingRef.current = null;
     };
   }, [roomId, pull]);

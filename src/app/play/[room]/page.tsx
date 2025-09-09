@@ -64,14 +64,13 @@ const ELEMENT_ICON: Record<string, string> = {
   Infinite: "/dice/infinite.png",
 };
 
-// สร้างแผนที่ code -> path โดยอาศัย art จาก cards.json (ไม่ hardcode)
+// code -> image path จาก cards.json (type ปลอดภัย)
 const CARD_IMG: Record<string, string> = Object.fromEntries(
-  [
-    ...cardsData.characters,
-    ...cardsData.supports,
-    ...cardsData.events,
-  ].map((c) => [c.code, `/cards/${c.art}`]),
-);
+  ([...cardsData.characters, ...cardsData.supports, ...cardsData.events] as Array<{
+    code: string;
+    art: string;
+  }>).map((c) => [c.code, `/cards/${c.art}` as const]),
+) as Record<string, string>;
 
 /* ===================== small UI bits ===================== */
 function Pill({ children }: { children: React.ReactNode }) {
@@ -85,9 +84,11 @@ function sortWithPriority(keys: string[], priority: string[]) {
   return [...keys].sort((a, b) => (at(a) - at(b)) || a.localeCompare(b));
 }
 function DiceList({ dice, priority }: { dice: DicePool; priority: string[] }) {
-  const items = Object.entries(dice || {})
+  const entries = Object.entries(dice as Record<string, number>) as [string, number][];
+  const items = entries
     .filter(([, n]) => (n ?? 0) > 0)
     .sort(([a], [b]) => (sortWithPriority([a, b], priority)[0] === a ? -1 : 1));
+
   if (!items.length) return <div className="opacity-60 text-sm">—</div>;
   return (
     <div className="flex flex-wrap gap-2 text-xs">
@@ -100,8 +101,9 @@ function DiceList({ dice, priority }: { dice: DicePool; priority: string[] }) {
   );
 }
 function DiceTray({ dice, priority }: { dice: DicePool; priority: string[] }) {
+  const entries = Object.entries(dice as Record<string, number>) as [string, number][];
   const arr: { el: string; id: string }[] = [];
-  for (const [el, n] of Object.entries(dice || {})) {
+  for (const [el, n] of entries) {
     for (let i = 0; i < (n ?? 0); i++) arr.push({ el, id: `${el}-${i}` });
   }
   arr.sort((a, b) => (sortWithPriority([a.el, b.el], priority)[0] === a.el ? -1 : 1));
@@ -398,7 +400,7 @@ export default function PlayRoomPage() {
   const foeRefs = useRef<(HTMLDivElement | null)[]>([]);
 
   // dice helpers
-  const yourDice = (yourSide && cs?.dice?.[yourSide]) || {};
+  const yourDice: DicePool = ((yourSide && cs?.dice?.[yourSide]) || {}) as DicePool;
   const yourEls = useMemo(() => {
     const s = new Set<string>();
     s.add("Infinite");
@@ -409,8 +411,8 @@ export default function PlayRoomPage() {
   const attUnit: UnitVM | null =
     yourSide != null && attacker != null ? cs?.board?.[yourSide]?.[attacker] ?? null : null;
 
-  const haveAny = (n: number) => Object.values(yourDice).reduce((a, b) => a + (b ?? 0), 0) >= n;
-  const canSpendEl = (el: string, need: number) => (yourDice[el] ?? 0) + (yourDice.Infinite ?? 0) >= need;
+  const haveAny = (n: number) => (Object.values(yourDice as Record<string, number>) as number[]).reduce((a, b) => a + (b ?? 0), 0) >= n;
+  const canSpendEl = (el: string, need: number) => ((yourDice as Record<string, number>)[el] ?? 0) + ((yourDice as Record<string, number>).Infinite ?? 0) >= need;
 
   const canBasic = !!attUnit && haveAny(1);
   const canSkill = !!attUnit && canSpendEl(attUnit.element, 3);
@@ -422,8 +424,8 @@ export default function PlayRoomPage() {
     if (foeCount > 0 && target == null) return;
     try {
       await combat(attacker, target, mode);
-    } catch (e) {
-      console.error("combat failed:", e);
+    } catch (err: unknown) {
+      console.error("combat failed:", err);
       alert("โจมตีไม่สำเร็จ ดู console สำหรับรายละเอียด");
     }
     setTarget(null);
@@ -439,8 +441,6 @@ export default function PlayRoomPage() {
     if (!cs || cs.mode !== "play") return;
     if (!cs.coin?.decided) return;
     if (!yourSide) return;
-    // รูปแบบ state ฝั่ง server ไม่มี coinAck ใน stateForClient เดิม
-    // ถ้ามีให้ใช้ป้องกันการโชว์ซ้ำ แต่ถ้าไม่มี เรากันซ้ำด้วย ref
     if (coinShownRef.current) return;
 
     coinShownRef.current = true;
@@ -449,7 +449,7 @@ export default function PlayRoomPage() {
     setCoinSpin(true);
     const t = setTimeout(() => setCoinSpin(false), 1200);
     return () => clearTimeout(t);
-  }, [cs?.mode, cs?.coin?.decided, cs?.turn, yourSide]);
+  }, [cs, yourSide]);
 
   /* ---------- phase overlay ---------- */
   const [phaseShow, setPhaseShow] = useState(false);
@@ -461,7 +461,7 @@ export default function PlayRoomPage() {
     setPhaseShow(true);
     const t = setTimeout(() => setPhaseShow(false), 1800);
     return () => clearTimeout(t);
-  }, [cs?.phaseNo, cs?.mode]);
+  }, [cs]);
 
   // ปิดทอยเหรียญ แล้วค่อยโชว์ Phase #1
   const onCoinDone = () => {
@@ -485,7 +485,7 @@ export default function PlayRoomPage() {
   const lockActions = !isYourTurn || alreadyEnded;
 
   // field data
-  const yourDiceD = (yourSide && cs?.dice?.[yourSide]) || {};
+  const yourDiceD: DicePool = ((yourSide && cs?.dice?.[yourSide]) || {}) as DicePool;
   const myUnits: UnitVM[] =
     (yourSide ? cs?.board?.[yourSide] : [])?.slice(0, 3).map((u) => ({ ...u, gauge: u.gauge ?? 0 })) ?? [];
   const foeUnits: UnitVM[] = (foeSide ? cs?.board?.[foeSide] : [])?.slice(0, 3) ?? [];
