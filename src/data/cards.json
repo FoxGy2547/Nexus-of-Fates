@@ -1,0 +1,23 @@
+{
+  "characters": [
+    { "char_id": 1,  "code": "BLAZE_KNIGHT",      "name": "Blaze Knight",      "element": "Pyro",      "attack": 5, "hp": 20, "cost": 3, "abilityCode": "burn1",       "art": "Blaze Knight.png" },
+    { "char_id": 2,  "code": "FROST_ARCHER",      "name": "Frost Archer",      "element": "Cryo",      "attack": 3, "hp": 20, "cost": 2, "abilityCode": "freeze1",     "art": "Frost Archer.png" },
+    { "char_id": 3,  "code": "THUNDER_COLOSSUS",  "name": "Thunder Colossus",  "element": "Electro",   "attack": 6, "hp": 20, "cost": 4, "abilityCode": "chain",       "art": "Thunder Colossus.png" },
+    { "char_id": 4,  "code": "WINDBLADE_DUELIST", "name": "Windblade Duelist", "element": "Anemo",     "attack": 3, "hp": 20, "cost": 1, "abilityCode": "gust",        "art": "Windblade Duelist.png" },
+    { "char_id": 5,  "code": "STONE_BULWARK",     "name": "Stone Bulwark",     "element": "Geo",       "attack": 2, "hp": 20, "cost": 2, "abilityCode": "shield",      "art": "Stone Bulwark.png" },
+    { "char_id": 6,  "code": "TIDE_MAGE",         "name": "Tide Mage",         "element": "Hydro",     "attack": 2, "hp": 20, "cost": 2, "abilityCode": "heal2",       "art": "Tide Mage.png" },
+    { "char_id": 7,  "code": "VOID_SEER",         "name": "Void Seer",         "element": "Quantum",   "attack": 4, "hp": 20, "cost": 3, "abilityCode": "collapse",    "art": "Void Seer.png" },
+    { "char_id": 8,  "code": "MINDSHAPER",        "name": "Mindshaper",        "element": "Imaginary", "attack": 3, "hp": 20, "cost": 3, "abilityCode": "distort",     "art": "Mindshaper.png" },
+    { "char_id": 9,  "code": "NEXUS_ADEPT",       "name": "Nexus Adept",       "element": "Neutral",   "attack": 2, "hp": 20, "cost": 1, "abilityCode": "meditate",    "art": "Nexus Adept.png" },
+    { "char_id": 10, "code": "ICE_WARDEN",        "name": "Ice Warden",        "element": "Cryo",      "attack": 4, "hp": 20, "cost": 3, "abilityCode": "frost_armor", "art": "Ice Warden.png" },
+    { "char_id": 11, "code": "CINDER_SCOUT",      "name": "Cinder Scout",      "element": "Pyro",      "attack": 3, "hp": 20, "cost": 1, "abilityCode": "ignite",      "art": "Cinder Scout.png" },
+    { "char_id": 12, "code": "WAVECALLER",        "name": "Wavecaller",        "element": "Hydro",     "attack": 2, "hp": 20, "cost": 2, "abilityCode": "high_tide",   "art": "Wavecaller.png" }
+  ],
+  "supports": [
+    { "id": 1, "code": "HEALING_AMULET", "name": "Healing Amulet", "element": "Hydro", "cost": 3, "text": "Heal team +2",   "art": "Healing Amulet.png" },
+    { "id": 2, "code": "BLAZING_SIGIL",  "name": "Blazing Sigil",  "element": "Pyro",  "cost": 3, "text": "Team shield +2", "art": "Blazing Sigil.png" }
+  ],
+  "events": [
+    { "id": 3, "code": "FIREWORKS", "name": "Fireworks", "element": "Pyro", "cost": 2, "text": "Deal 2 dmg to all enemies", "art": "Fireworks.png" }
+  ]
+}
