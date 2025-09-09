@@ -1,14 +1,60 @@
 // src/app/api/game/route.ts
 import { NextResponse } from "next/server";
 import mysql from "mysql2/promise";
-import cardsData from "@/data/cards.json";
+import cardsDataJson from "@/data/cards.json";
+
+/* ========================= Cards types & helpers ========================= */
+
+type CharacterCard = {
+  char_id: number;
+  code: string;
+  name: string;
+  element: string;
+  attack: number;
+  hp: number;
+  cost: number;
+  abilityCode: string;
+  art: string;
+};
+type SupportCard = {
+  id: number;
+  code: string;
+  name: string;
+  element: string;
+  cost: number;
+  text: string;
+  art: string;
+};
+type EventCard = {
+  id: number;
+  code: string;
+  name: string;
+  element: string;
+  cost: number;
+  text: string;
+  art: string;
+};
+type CardsData = {
+  characters: CharacterCard[];
+  supports: SupportCard[];
+  events: EventCard[];
+};
+const cardsData = cardsDataJson as CardsData;
 
 /* ========================= DB ========================= */
 
-function buildPool() {
+function buildPool(): mysql.Pool | null {
   const {
-    MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE, MYSQL_PORT,
-    DB_HOST, DB_USER, DB_PASS, DB_NAME, DB_PORT,
+    MYSQL_HOST,
+    MYSQL_USER,
+    MYSQL_PASSWORD,
+    MYSQL_DATABASE,
+    MYSQL_PORT,
+    DB_HOST,
+    DB_USER,
+    DB_PASS,
+    DB_NAME,
+    DB_PORT,
     DATABASE_URL,
   } = process.env as Record<string, string | undefined>;
 
@@ -29,32 +75,52 @@ function buildPool() {
   if (!host || !user || !database) return null;
 
   return mysql.createPool({
-    host, user, password, database, port,
+    host,
+    user,
+    password,
+    database,
+    port,
     waitForConnections: true,
     connectionLimit: 10,
   });
 }
 
 // singleton pool (dev hot-reload safety)
-const g = globalThis as any;
-if (!g.__NOF_POOL__) {
-  try { g.__NOF_POOL__ = buildPool(); } catch { g.__NOF_POOL__ = null; }
+const gPool = globalThis as typeof globalThis & {
+  __NOF_POOL__?: mysql.Pool | null;
+};
+if (!gPool.__NOF_POOL__) {
+  try {
+    gPool.__NOF_POOL__ = buildPool();
+  } catch {
+    gPool.__NOF_POOL__ = null;
+  }
 }
-const pool: mysql.Pool | null = g.__NOF_POOL__;
+const pool: mysql.Pool | null = gPool.__NOF_POOL__;
 const DB_ON = !!pool;
 
-async function qOne<T = any>(sql: string, params: any[] = []): Promise<T | null> {
+/** query one (typed, no any) */
+async function qOne<T>(
+  sql: string,
+  params: (string | number | null | undefined)[] = [],
+): Promise<T | null> {
   if (!pool) return null;
-  const [rows] = await pool.query(sql, params);
-  const arr = rows as any[];
-  return (arr && arr[0]) ?? null;
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(sql, params);
+  const first = rows[0] as unknown as T | undefined;
+  return first ?? null;
 }
 
 /* ========================= Types & Room ========================= */
 
 type Side = "p1" | "p2";
 type DicePool = Record<string, number>;
-type UnitVM = { code: string; element: string; attack: number; hp: number; gauge?: number };
+type UnitVM = {
+  code: string;
+  element: string;
+  attack: number;
+  hp: number;
+  gauge?: number;
+};
 type PlayerInfo = { userId: string; name?: string | null; avatar?: string | null };
 
 type RoomState = {
@@ -81,8 +147,12 @@ type RoomState = {
   warnNoDeck?: string[];
 };
 
-if (!g.__NOF_STORE__) g.__NOF_STORE__ = { rooms: new Map<string, RoomState>() };
-const store = g.__NOF_STORE__ as { rooms: Map<string, RoomState> };
+// in-memory store rooms (singleton)
+const gStore = globalThis as typeof globalThis & {
+  __NOF_STORE__?: { rooms: Map<string, RoomState> };
+};
+if (!gStore.__NOF_STORE__) gStore.__NOF_STORE__ = { rooms: new Map<string, RoomState>() };
+const store = gStore.__NOF_STORE__!;
 
 function ensureRoom(id: string): RoomState {
   let r = store.rooms.get(id);
@@ -119,7 +189,16 @@ function sideOf(room: RoomState, userId: string): Side | null {
 /* ========================= Cards helpers ========================= */
 
 const ELEMENTS = [
-  "Pyro","Hydro","Cryo","Electro","Geo","Anemo","Quantum","Imaginary","Neutral","Infinite",
+  "Pyro",
+  "Hydro",
+  "Cryo",
+  "Electro",
+  "Geo",
+  "Anemo",
+  "Quantum",
+  "Imaginary",
+  "Neutral",
+  "Infinite",
 ] as const;
 type ElementKind = (typeof ELEMENTS)[number];
 
@@ -131,9 +210,9 @@ function shuffle<T>(arr: T[]) {
   return arr;
 }
 
-const allChars   = () => ((cardsData as any).characters ?? []) as Array<any>;
-const allSupports= () => ((cardsData as any).supports   ?? []) as Array<any>;
-const allEvents  = () => ((cardsData as any).events     ?? []) as Array<any>;
+const allChars = (): CharacterCard[] => cardsData.characters ?? [];
+const allSupports = (): SupportCard[] => cardsData.supports ?? [];
+const allEvents = (): EventCard[] => cardsData.events ?? [];
 
 function toUnit(code: string): UnitVM | null {
   const ch = allChars().find((c) => c.code === code);
@@ -156,10 +235,14 @@ function spendAny(poolD: DicePool, n: number): boolean {
   const total = Object.values(poolD).reduce((a, b) => a + (b ?? 0), 0);
   if (total < n) return false;
   while (n-- > 0) {
-    if ((poolD.Infinite ?? 0) > 0) { poolD.Infinite--; continue; }
-    const k = Object.keys(poolD).find((x) => (poolD as any)[x] > 0) as ElementKind | undefined;
+    if ((poolD.Infinite ?? 0) > 0) {
+      poolD.Infinite--;
+      continue;
+    }
+    const keys = Object.keys(poolD) as ElementKind[];
+    const k = keys.find((key) => (poolD[key] ?? 0) > 0);
     if (!k) return false;
-    (poolD as any)[k]--;
+    poolD[k] = (poolD[k] ?? 0) - 1;
   }
   return true;
 }
@@ -194,13 +277,16 @@ async function findUserRowByAny(key: string, display?: string | null): Promise<U
 }
 
 type DeckRow = {
-  id: number; user_id: number; name: string | null;
-  card_char1?: number | null; card_char2?: number | null; card_char3?: number | null;
-  // card1..card20: support/event IDs
-  [k: `card${number}`]: number | null | undefined;
+  id: number;
+  user_id: number;
+  name: string | null;
+  card_char1?: number | null;
+  card_char2?: number | null;
+  card_char3?: number | null;
+  [k: `card${number}`]: number | null | undefined; // card1..card20
 };
 
-// โหลดตัวละคร 3 ใบแรก (แม็พด้วย characters.char_id) และเด็ค 20 ใบ (supports/events id)
+// โหลดตัวละคร 3 ใบแรก และเด็ค 20 ใบ (supports/events)
 async function loadDeckFromDB(userId: number): Promise<{ chars: string[]; deck: string[] } | null> {
   const row = await qOne<DeckRow>("SELECT * FROM decks WHERE user_id = ? LIMIT 1", [userId]);
   if (!row) return null;
@@ -237,7 +323,6 @@ async function startGame(room: RoomState) {
   room.endTurned = { p1: false, p2: false };
   room.phaseEndOrder = [];
 
-  // เตรียมฝั่ง p1/p2 จาก DB; ไม่เจอ → fallback สุ่มจากไฟล์
   const setup = async (side: Side) => {
     room.board[side] = [];
     room.hand[side] = [];
@@ -253,12 +338,11 @@ async function startGame(room: RoomState) {
         const fromDb = await loadDeckFromDB(u.id);
         if (fromDb) {
           boardCodes = fromDb.chars.slice(0, 3);
-          deckCodes = fromDb.deck.slice(); // supports/events เท่านั้น
+          deckCodes = fromDb.deck.slice();
         }
       }
     }
 
-    // fallback (ไม่มีใน DB): สุ่ม 3 ตัวละคร + เด็ค action ทั้งหมดจากไฟล์
     if (!boardCodes.length) {
       const candidates = allChars().map((c) => c.code);
       shuffle(candidates);
@@ -267,17 +351,16 @@ async function startGame(room: RoomState) {
     if (!deckCodes.length) {
       const supports = allSupports().map((c) => c.code);
       const events = allEvents().map((c) => c.code);
-      deckCodes = shuffle([...supports, ...events, ...supports, ...events]); // ขยายจำนวนให้จั่วพอ
+      deckCodes = shuffle([...supports, ...events, ...supports, ...events]);
     }
 
     room.board[side] = boardCodes.map((c) => toUnit(c)!).filter(Boolean);
     room.deck[side] = deckCodes;
-    draw(room, side, 5); // มือเริ่มเกม = 5 ใบ
+    draw(room, side, 5);
   };
 
   await Promise.all([setup("p1"), setup("p2")]);
 
-  // ลูกเต๋าเริ่มต้น (ไม่สุ่ม Infinite)
   room.dice.p1 = {};
   room.dice.p2 = {};
   for (let i = 0; i < 10; i++) {
@@ -286,10 +369,9 @@ async function startGame(room: RoomState) {
     addDie(room.dice.p2, el);
   }
 
-  // เหรียญ: โยนครั้งแรกหลัง startGame เท่านั้น
   const win: Side = Math.random() < 0.5 ? "p1" : "p2";
   room.coin = { decided: true, winner: win };
-  room.coinAck = { p1: false, p2: false }; // ต้องกด OK ทั้งคู่
+  room.coinAck = { p1: false, p2: false };
   room.turn = win;
   room.phaseActor = win;
 }
@@ -302,11 +384,15 @@ function stateForClient(room: RoomState, currentUserId?: string) {
   return {
     mode: room.mode,
     players: {
-      p1: room.players.p1 ? { name: room.players.p1.name ?? "Host",   avatar: room.players.p1.avatar ?? null } : undefined,
-      p2: room.players.p2 ? { name: room.players.p2.name ?? "Player", avatar: room.players.p2.avatar ?? null } : undefined,
+      p1: room.players.p1
+        ? { name: room.players.p1.name ?? "Host", avatar: room.players.p1.avatar ?? null }
+        : undefined,
+      p2: room.players.p2
+        ? { name: room.players.p2.name ?? "Player", avatar: room.players.p2.avatar ?? null }
+        : undefined,
     },
     coin: room.coin,
-    coinAck: room.coinAck, // 👈 ส่งไปให้ client ใช้ตัดสิน overlay
+    coinAck: room.coinAck,
     turn: room.turn,
     phaseNo: room.phaseNo,
     phaseActor: room.phaseActor,
@@ -320,9 +406,12 @@ function stateForClient(room: RoomState, currentUserId?: string) {
   };
 }
 
-/* ========================= Deck presence (เตือนเฉย ๆ) ========================= */
+/* ========================= Deck presence (warn only) ========================= */
 
-async function userHasDeck(room: RoomState, side: Side): Promise<{ has: boolean; display?: string | null }> {
+async function userHasDeck(
+  room: RoomState,
+  side: Side,
+): Promise<{ has: boolean; display?: string | null }> {
   if (!DB_ON || !pool) return { has: true, display: room.players[side]?.name ?? null };
   const p = room.players[side];
   if (!p) return { has: false, display: null };
@@ -370,8 +459,14 @@ function joinRoom(roomId: string, user: PlayerInfo) {
     room.players[s] = user;
     return { ok: true, roomId: id };
   }
-  if (!room.players.p1) { room.players.p1 = user; return { ok: true, roomId: id }; }
-  if (!room.players.p2) { room.players.p2 = user; return { ok: true, roomId: id }; }
+  if (!room.players.p1) {
+    room.players.p1 = user;
+    return { ok: true, roomId: id };
+  }
+  if (!room.players.p2) {
+    room.players.p2 = user;
+    return { ok: true, roomId: id };
+  }
   throw new Error("Room is full");
 }
 
@@ -419,7 +514,7 @@ function endPhase(room: RoomState, userId: string) {
   room.endTurned = { p1: false, p2: false };
   room.phaseEndOrder = [];
 
-  // จบเฟสแล้วจั่ว +2 ตามกติกา
+  // จบเฟสแล้วจั่ว +2
   draw(room, "p1", 2);
   draw(room, "p2", 2);
 }
@@ -431,7 +526,7 @@ function playCard(room: RoomState, userId: string, handIndex: number) {
   const card = room.hand[s][handIndex];
   if (!card) return;
 
-  // ถ้ามี character หลุดมาในเด็ค (ความผิดพลาดของข้อมูล) ให้ทิ้งเฉย ๆ
+  // ถ้ามี character หลุดมา → ทิ้งเฉย ๆ
   if (allChars().some((c) => c.code === card)) {
     room.hand[s].splice(handIndex, 1);
     return;
@@ -443,7 +538,6 @@ function playCard(room: RoomState, userId: string, handIndex: number) {
     room.board[s].forEach((u) => (u.hp += 2));
   }
   room.hand[s].splice(handIndex, 1);
-  // Play = จัดการการ์ด → ไม่จบเทิร์น
 }
 
 function discardForInfinite(room: RoomState, userId: string, handIndex: number) {
@@ -454,7 +548,6 @@ function discardForInfinite(room: RoomState, userId: string, handIndex: number) 
   if (!card) return;
   room.hand[s].splice(handIndex, 1);
   addDie(room.dice[s], "Infinite", 1);
-  // Discard = จัดการการ์ด → ไม่จบเทิร์น
 }
 
 function combat(
@@ -506,7 +599,7 @@ function combat(
     if (tgt.hp <= 0) room.board[foe].splice(t, 1);
   }
 
-  // จบเทิร์นเฉพาะที่เป็นการต่อสู้
+  // จบเทิร์นเฉพาะการต่อสู้
   passTurnAfterCombat(room, s);
 }
 
@@ -514,7 +607,17 @@ function combat(
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json().catch(() => ({}));
+    const body = (await req.json().catch(() => ({}))) as {
+      action?: string;
+      roomId?: string;
+      userId?: string;
+      user?: PlayerInfo;
+      index?: number;
+      attacker?: number;
+      target?: number | null;
+      mode?: "basic" | "skill" | "ult";
+    };
+
     const action = String(body?.action || "");
     const roomId = String(body?.roomId || "").toUpperCase();
 
@@ -527,11 +630,11 @@ export async function POST(req: Request) {
     }
 
     if (action === "createRoom") {
-      const res = createRoom(String(body.roomId || "").toUpperCase(), body.user as PlayerInfo);
+      const res = createRoom(String(body.roomId || "").toUpperCase(), (body.user ?? {}) as PlayerInfo);
       return NextResponse.json(res);
     }
     if (action === "joinRoom") {
-      const res = joinRoom(String(body.roomId || "").toUpperCase(), body.user as PlayerInfo);
+      const res = joinRoom(String(body.roomId || "").toUpperCase(), (body.user ?? {}) as PlayerInfo);
       return NextResponse.json(res);
     }
 
@@ -553,7 +656,7 @@ export async function POST(req: Request) {
         room.warnNoDeck = missing.length ? missing : undefined;
 
         if (room.ready.p1 && room.ready.p2 && room.mode !== "play") {
-          await startGame(room); // เริ่มเกมครั้งเดียว → coin toss ตอนนี้แหละ
+          await startGame(room);
         }
 
         return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
@@ -603,7 +706,8 @@ export async function POST(req: Request) {
       default:
         throw new Error(`Unknown action: ${action}`);
     }
-  } catch (e: any) {
-    return NextResponse.json({ error: e?.message ?? "Server error" }, { status: 400 });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "Server error";
+    return NextResponse.json({ error: message }, { status: 400 });
   }
 }
