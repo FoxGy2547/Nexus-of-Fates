@@ -441,9 +441,9 @@ export default function PlayRoomPage() {
 
   useEffect(() => {
     if (!cs || cs.mode !== "play") return;
-    if (!cs.coin?.decided) return; // โชว์เฉพาะตอนเพิ่งเริ่มเกม
+    if (!cs.coin?.decided) return;
     if (!yourSide) return;
-    if (coinShownRef.current) return; // กันเรียกซ้ำ
+    if (coinShownRef.current) return;
 
     coinShownRef.current = true;
     setCoinWinner(cs.turn);
@@ -451,7 +451,7 @@ export default function PlayRoomPage() {
     setCoinSpin(true);
     const t = setTimeout(() => setCoinSpin(false), 1200);
     return () => clearTimeout(t);
-  }, [cs, yourSide]);
+  }, [cs, yourSide]); // <-- เพิ่ม cs เข้าไป
 
   /* ---------- phase overlay ---------- */
   const [phaseShow, setPhaseShow] = useState(false);
@@ -463,7 +463,7 @@ export default function PlayRoomPage() {
     setPhaseShow(true);
     const t = setTimeout(() => setPhaseShow(false), 1800);
     return () => clearTimeout(t);
-  }, [cs?.phaseNo, cs?.mode]);
+  }, [cs]); // <-- ให้มี cs
 
   // ปิดทอยเหรียญ แล้วค่อยโชว์ Phase #1
   const onCoinDone = () => {

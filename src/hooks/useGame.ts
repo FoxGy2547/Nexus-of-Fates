@@ -3,22 +3,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-/* ======================= shared types (client) ======================= */
+/* ========== shared types (client) ========== */
 export type Side = "p1" | "p2";
 export type DicePool = Record<string, number>;
 export type UnitVM = { code: string; element: string; attack: number; hp: number; gauge?: number };
 
 export type ClientState = {
   mode: "lobby" | "play";
-  players: Partial<
-    Record<
-      Side,
-      {
-        name?: string | null;
-        avatar?: string | null;
-      }
-    >
-  >;
+  players: Partial<Record<Side, { name?: string | null; avatar?: string | null }>>;
   coin: { decided: boolean; winner?: Side };
   coinAck: Record<Side, boolean>;
   turn: Side;
@@ -38,73 +30,80 @@ export type Role = "host" | "player" | null;
 
 type PlayerInfo = { userId: string; name?: string | null; avatar?: string | null };
 
-/* ======================= tiny user identity ======================= */
+/* ========== tiny user identity ========== */
 const USER_KEY = "nof:user";
+
 function getUser(): PlayerInfo {
   const raw = typeof window !== "undefined" ? window.localStorage.getItem(USER_KEY) : null;
   if (raw) {
     try {
-      const u = JSON.parse(raw);
-      if (u?.userId) return u;
-    } catch {}
+      const u = JSON.parse(raw) as unknown;
+      if (u && typeof u === "object" && "userId" in u && typeof (u as { userId: unknown }).userId === "string") {
+        return u as PlayerInfo;
+      }
+    } catch {
+      // ignore and fallthrough to create anon
+    }
   }
-  // สร้างแบบง่าย ๆ ถ้ายังไม่มี
+  const w = (typeof window !== "undefined" ? (window as unknown as { __USER_NAME__?: string }) : undefined);
   const anon: PlayerInfo = {
     userId: Math.random().toString(36).slice(2) + Date.now().toString(36).toUpperCase(),
-    name: (typeof window !== "undefined" && (window as any).__USER_NAME__) || null,
+    name: w?.__USER_NAME__ ?? null,
     avatar: null,
   };
   if (typeof window !== "undefined") localStorage.setItem(USER_KEY, JSON.stringify(anon));
   return anon;
 }
 
-/* ======================= robust fetcher ======================= */
-async function apiCall<T = any>(payload: Record<string, any>): Promise<T> {
+/* ========== robust fetcher ========== */
+function getErrorMessage(x: unknown): string | null {
+  if (x && typeof x === "object" && "error" in x) {
+    const v = (x as { error: unknown }).error;
+    if (typeof v === "string") return v;
+  }
+  return null;
+}
+
+async function apiCall<T>(payload: Record<string, unknown>): Promise<T> {
   const res = await fetch("/api/game", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload), // << สำคัญ
+    body: JSON.stringify(payload),
     cache: "no-store",
   });
 
-  // กันกรณี server ตอบไม่ใช่ JSON
   const text = await res.text();
-  let data: any = {};
+  let data: unknown = {};
   try {
-    data = text ? JSON.parse(text) : {};
+    data = text ? (JSON.parse(text) as unknown) : {};
   } catch {
-    if (!res.ok) {
-      throw new Error(text?.slice(0, 200) || `HTTP ${res.status}`);
-    } else {
-      throw new Error("Server returned non-JSON response");
-    }
+    if (!res.ok) throw new Error(text?.slice(0, 200) || `HTTP ${res.status}`);
+    throw new Error("Server returned non-JSON response");
   }
 
   if (!res.ok) {
-    throw new Error(data?.error || `HTTP ${res.status}`);
+    const msg = getErrorMessage(data) ?? `HTTP ${res.status}`;
+    throw new Error(msg);
   }
   return data as T;
 }
 
-/* ======================= hook ======================= */
+/* ========== hook ========== */
 export function useGame(roomId: string) {
   const user = useMemo(() => getUser(), []);
   const [state, setState] = useState<ClientState | null>(null);
   const [role, setRole] = useState<Role>(null);
-  const pollRef = useRef<NodeJS.Timeout | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // ตัดสินบทบาทจากว่าห้องมีเราเป็น p1/p2 หรือยังว่าง
-  const decideRole = useCallback((s: ClientState | null): Role => {
-    if (!s) return null;
-    const p1 = s.players?.p1?.name ?? null;
-    const p2 = s.players?.p2?.name ?? null;
-    // ถ้าเราสร้างห้องก่อน (หน้า /play/{room} ที่มากด Create จากหน้าแรก) ให้ถือเป็น host
-    // client ฝั่งหน้า index ควรเรียก createRoom ก่อน push ไปที่ /play/{room}
-    // ที่นี่จะ fallback ให้เป็น host ถ้าในห้องยังว่าง
-    if (!p1 && !p2) return "host";
-    if (s.you) return s.you === "p1" ? "host" : "player";
-    return role;
-  }, [role]);
+  const decideRole = useCallback(
+    (s: ClientState | null): Role => {
+      if (!s) return null;
+      if (!s.players?.p1 && !s.players?.p2) return "host";
+      if (s.you) return s.you === "p1" ? "host" : "player";
+      return role;
+    },
+    [role],
+  );
 
   const refresh = useCallback(async () => {
     if (!roomId) return;
@@ -118,44 +117,37 @@ export function useGame(roomId: string) {
       const r = decideRole(res.state);
       if (r !== role) setRole(r);
     } catch (e) {
+      // แค่ log ไม่ทำให้ UI ตาย
+      // eslint-disable-next-line no-console
       console.error("getState failed:", e);
     }
   }, [roomId, user.userId, role, decideRole]);
 
-  // เริ่ม polling
   useEffect(() => {
     if (!roomId) return;
-    refresh();
+    void refresh();
     if (pollRef.current) clearInterval(pollRef.current);
-    pollRef.current = setInterval(refresh, 1200);
+    pollRef.current = setInterval(() => void refresh(), 1200);
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
       pollRef.current = null;
     };
   }, [roomId, refresh]);
 
-  /* -------- room ops (create/join) — ใช้บนหน้าแรก -------- */
+  /* ---- room ops (หน้าแรก) ---- */
   const createRoom = useCallback(async () => {
     if (!roomId) throw new Error("Missing roomId");
-    const res = await apiCall<{ ok: true; roomId: string }>({
-      action: "createRoom",
-      roomId,
-      user,
-    });
+    const res = await apiCall<{ ok: true; roomId: string }>({ action: "createRoom", roomId, user });
     return res.roomId;
   }, [roomId, user]);
 
   const joinRoom = useCallback(async () => {
     if (!roomId) throw new Error("Missing roomId");
-    const res = await apiCall<{ ok: true; roomId: string }>({
-      action: "joinRoom",
-      roomId,
-      user,
-    });
+    const res = await apiCall<{ ok: true; roomId: string }>({ action: "joinRoom", roomId, user });
     return res.roomId;
   }, [roomId, user]);
 
-  /* -------- in-game ops -------- */
+  /* ---- in-game ops ---- */
   const ready = useCallback(async () => {
     await apiCall({ action: "ready", roomId, user });
     await refresh();
@@ -195,11 +187,9 @@ export function useGame(roomId: string) {
     [roomId, user, refresh],
   );
 
-  /* -------- derive helpers -------- */
   const you: Side | null = useMemo(() => {
     const s = state;
     if (!s) return null;
-    // server จะส่ง field you อยู่แล้ว แต่ fallback ให้
     if (s.you) return s.you;
     if (s.players?.p1?.name === user.name) return "p1";
     if (s.players?.p2?.name === user.name) return "p2";
@@ -211,10 +201,8 @@ export function useGame(roomId: string) {
     role,
     you,
     refresh,
-    // lobby ops (ใช้หน้าแรก)
     createRoom,
     joinRoom,
-    // game ops (ใช้ในหน้า play)
     ready,
     ackCoin,
     endPhase,

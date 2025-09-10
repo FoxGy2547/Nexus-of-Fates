@@ -161,7 +161,10 @@ async function loadRoom(roomId: string): Promise<{ state: RoomState; version: nu
   const id = roomId.toUpperCase();
 
   if (DB_ON && pool) {
-    const [rows] = await pool.query<mysql.RowDataPacket[]>("SELECT id, version, state_json FROM rooms WHERE id = ? LIMIT 1", [id]);
+    const [rows] = await pool.query<mysql.RowDataPacket[]>(
+      "SELECT id, version, state_json FROM rooms WHERE id = ? LIMIT 1",
+      [id],
+    );
     const row = rows[0] as RoomRow | undefined;
     if (row) {
       const state = JSON.parse(row.state_json) as RoomState;
@@ -169,7 +172,10 @@ async function loadRoom(roomId: string): Promise<{ state: RoomState; version: nu
     }
     // not found → insert fresh
     const state = freshRoom(id);
-    await pool.query("INSERT INTO rooms (id, version, state_json) VALUES (?, 1, ?)", [id, JSON.stringify(state)]);
+    await pool.query("INSERT INTO rooms (id, version, state_json) VALUES (?, 1, ?)", [
+      id,
+      JSON.stringify(state),
+    ]);
     return { state, version: 1 };
   }
 
@@ -181,7 +187,12 @@ async function loadRoom(roomId: string): Promise<{ state: RoomState; version: nu
   return { state, version: 1 };
 }
 
-async function saveRoom(roomId: string, nextState: RoomState, prevVersion: number, retry = 0): Promise<{ version: number }> {
+async function saveRoom(
+  roomId: string,
+  nextState: RoomState,
+  prevVersion: number,
+  retry = 0,
+): Promise<{ version: number }> {
   const id = roomId.toUpperCase();
 
   if (DB_ON && pool) {
@@ -190,11 +201,9 @@ async function saveRoom(roomId: string, nextState: RoomState, prevVersion: numbe
       [JSON.stringify(nextState), id, prevVersion],
     );
     if (res.affectedRows === 0) {
-      // version conflict → reload once or twice
+      // version conflict → reload and retry
       if (retry >= 2) throw new Error("Conflict: room was updated concurrently");
-      const { state, version } = await loadRoom(id);
-      // merge strategy: last writer wins (ใช้ state ล่าสุดเป็นฐานแล้วค่อยๆทำซ้ำฝั่ง caller ถ้าต้องการก็ทำ แต่ตอนนี้เขียนทับ)
-      // สำหรับเกมเทิร์นเบส ขอให้ caller เรียกซ้ำ action เดิม
+      const { version } = await loadRoom(id);
       return saveRoom(id, nextState, version, retry + 1);
     }
     return { version: prevVersion + 1 };
@@ -212,7 +221,18 @@ async function saveRoom(roomId: string, nextState: RoomState, prevVersion: numbe
 }
 
 /* ========================= Utilities ========================= */
-const ELEMENTS = ["Pyro", "Hydro", "Cryo", "Electro", "Geo", "Anemo", "Quantum", "Imaginary", "Neutral", "Infinite"] as const;
+const ELEMENTS = [
+  "Pyro",
+  "Hydro",
+  "Cryo",
+  "Electro",
+  "Geo",
+  "Anemo",
+  "Quantum",
+  "Imaginary",
+  "Neutral",
+  "Infinite",
+] as const;
 type ElementKind = (typeof ELEMENTS)[number];
 
 function shuffle<T>(arr: T[]) {
@@ -277,7 +297,10 @@ function sideOf(room: RoomState, userId: string): Side | null {
 
 /* ========================= DB: users/decks (optional) ========================= */
 type UserRow = { id: number; username?: string | null };
-async function qOne<T>(sql: string, params: (string | number | null | undefined)[] = []): Promise<T | null> {
+async function qOne<T>(
+  sql: string,
+  params: (string | number | null | undefined)[] = [],
+): Promise<T | null> {
   if (!pool) return null;
   const [rows] = await pool.query<mysql.RowDataPacket[]>(sql, params);
   const first = rows[0] as unknown as T | undefined;
@@ -286,7 +309,9 @@ async function qOne<T>(sql: string, params: (string | number | null | undefined)
 async function findUserRowByAny(key: string, display?: string | null): Promise<UserRow | null> {
   if (!DB_ON || !pool) return null;
   if (/^\d{6,}$/.test(key)) {
-    const u = await qOne<UserRow>("SELECT id, username FROM users WHERE discord_id = ? LIMIT 1", [key]);
+    const u = await qOne<UserRow>("SELECT id, username FROM users WHERE discord_id = ? LIMIT 1", [
+      key,
+    ]);
     if (u) return u;
   }
   if (/@/.test(key)) {
@@ -294,7 +319,9 @@ async function findUserRowByAny(key: string, display?: string | null): Promise<U
     if (u) return u;
   }
   const name = display ?? key;
-  const u = await qOne<UserRow>("SELECT id, username FROM users WHERE username = ? LIMIT 1", [name]);
+  const u = await qOne<UserRow>("SELECT id, username FROM users WHERE username = ? LIMIT 1", [
+    name,
+  ]);
   return u ?? null;
 }
 type DeckRow = {
@@ -514,6 +541,7 @@ function playCard(room: RoomState, userId: string, handIndex: number) {
   const card = room.hand[s][handIndex];
   if (!card) return;
 
+  // เผื่อเด็คหลุดมี character card
   if (allChars().some((c) => c.code === card)) {
     room.hand[s].splice(handIndex, 1);
     return;
