@@ -3,14 +3,28 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-/* ========== shared types (client) ========== */
+/* ========================= Shared types (used by page.tsx) ========================= */
 export type Side = "p1" | "p2";
+
 export type DicePool = Record<string, number>;
-export type UnitVM = { code: string; element: string; attack: number; hp: number; gauge?: number };
+
+export type UnitVM = {
+  code: string;
+  element: string;
+  attack: number;
+  hp: number;
+  gauge?: number;
+};
+
+export type PlayerInfo = {
+  userId: string;
+  name?: string | null;
+  avatar?: string | null;
+};
 
 export type ClientState = {
   mode: "lobby" | "play";
-  players: Partial<Record<Side, { name?: string | null; avatar?: string | null }>>;
+  players: Partial<Record<Side, { name: string; avatar: string | null }>>;
   coin: { decided: boolean; winner?: Side };
   coinAck: Record<Side, boolean>;
   turn: Side;
@@ -18,196 +32,273 @@ export type ClientState = {
   phaseActor: Side;
   endTurned: Record<Side, boolean>;
   hero: Record<Side, number>;
+  dice: Record<Side, DicePool>;
   board: Record<Side, UnitVM[]>;
   hand: Record<Side, string[]>;
-  dice: Record<Side, DicePool>;
   ready: Record<Side, boolean>;
   you?: Side;
   warnNoDeck?: string[];
 };
 
-export type Role = "host" | "player" | null;
+type ApiOk<T extends Record<string, unknown> = Record<string, never>> = { ok: true } & T;
+type ApiErr = { error: string };
 
-type PlayerInfo = { userId: string; name?: string | null; avatar?: string | null };
+/* ========================= API helper (always JSON) ========================= */
+type ApiPayload = {
+  action: string;
+  roomId?: string;
+  userId?: string;
+  user?: PlayerInfo;
+  index?: number;
+  attacker?: number;
+  target?: number | null;
+  mode?: "basic" | "skill" | "ult";
+};
 
-/* ========== tiny user identity ========== */
-const USER_KEY = "nof:user";
-
-function getUser(): PlayerInfo {
-  const raw = typeof window !== "undefined" ? window.localStorage.getItem(USER_KEY) : null;
-  if (raw) {
-    try {
-      const u = JSON.parse(raw) as unknown;
-      if (u && typeof u === "object" && "userId" in u && typeof (u as { userId: unknown }).userId === "string") {
-        return u as PlayerInfo;
-      }
-    } catch {
-      // ignore and fallthrough to create anon
-    }
-  }
-  const w = (typeof window !== "undefined" ? (window as unknown as { __USER_NAME__?: string }) : undefined);
-  const anon: PlayerInfo = {
-    userId: Math.random().toString(36).slice(2) + Date.now().toString(36).toUpperCase(),
-    name: w?.__USER_NAME__ ?? null,
-    avatar: null,
-  };
-  if (typeof window !== "undefined") localStorage.setItem(USER_KEY, JSON.stringify(anon));
-  return anon;
-}
-
-/* ========== robust fetcher ========== */
-function getErrorMessage(x: unknown): string | null {
-  if (x && typeof x === "object" && "error" in x) {
-    const v = (x as { error: unknown }).error;
-    if (typeof v === "string") return v;
-  }
-  return null;
-}
-
-async function apiCall<T>(payload: Record<string, unknown>): Promise<T> {
+async function postGame<TExpected extends object>(payload: ApiPayload): Promise<TExpected> {
   const res = await fetch("/api/game", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "content-type": "application/json" },
     body: JSON.stringify(payload),
-    cache: "no-store",
   });
 
   const text = await res.text();
-  let data: unknown = {};
+  let json: unknown = null;
   try {
-    data = text ? (JSON.parse(text) as unknown) : {};
+    json = text ? JSON.parse(text) : null;
   } catch {
-    if (!res.ok) throw new Error(text?.slice(0, 200) || `HTTP ${res.status}`);
-    throw new Error("Server returned non-JSON response");
+    throw new Error(`HTTP ${res.status}: ${text}`);
   }
 
   if (!res.ok) {
-    const msg = getErrorMessage(data) ?? `HTTP ${res.status}`;
-    throw new Error(msg);
+    const err = (json as ApiErr | null)?.error ?? `HTTP ${res.status}`;
+    throw new Error(err);
   }
-  return data as T;
+
+  return (json ?? {}) as TExpected;
 }
 
-/* ========== hook ========== */
-export function useGame(roomId: string) {
-  const user = useMemo(() => getUser(), []);
-  const [state, setState] = useState<ClientState | null>(null);
-  const [role, setRole] = useState<Role>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const decideRole = useCallback(
-    (s: ClientState | null): Role => {
-      if (!s) return null;
-      if (!s.players?.p1 && !s.players?.p2) return "host";
-      if (s.you) return s.you === "p1" ? "host" : "player";
-      return role;
-    },
-    [role],
-  );
-
-  const refresh = useCallback(async () => {
-    if (!roomId) return;
-    try {
-      const res = await apiCall<{ ok: true; state: ClientState }>({
-        action: "getState",
-        roomId,
-        userId: user.userId,
-      });
-      setState(res.state);
-      const r = decideRole(res.state);
-      if (r !== role) setRole(r);
-    } catch (e) {
-      // แค่ log ไม่ทำให้ UI ตาย
-      // eslint-disable-next-line no-console
-      console.error("getState failed:", e);
+/* ========================= local user identity ========================= */
+function loadOrCreateUser(): PlayerInfo {
+  try {
+    const raw = typeof window !== "undefined" ? window.localStorage.getItem("nof.user") : null;
+    if (raw) {
+      const parsed = JSON.parse(raw) as PlayerInfo;
+      if (parsed && typeof parsed.userId === "string" && parsed.userId.length > 0) return parsed;
     }
-  }, [roomId, user.userId, role, decideRole]);
+  } catch {
+    // ignore
+  }
+  const user: PlayerInfo = {
+    userId: `U${Math.random().toString(36).slice(2, 10)}`,
+    name: null,
+    avatar: null,
+  };
+  try {
+    if (typeof window !== "undefined") window.localStorage.setItem("nof.user", JSON.stringify(user));
+  } catch {
+    // ignore
+  }
+  return user;
+}
 
+/* ========================= Hook ========================= */
+type UseGameReturn = {
+  role: "host" | "player" | "-";
+  user: PlayerInfo;
+  state: ClientState | null;
+
+  // match the calls used on page.tsx
+  ready: () => Promise<void>;
+  endPhase: () => Promise<void>;
+  playCard: (index: number) => Promise<void>;
+  discardForInfinite: (index: number) => Promise<void>;
+  combat: (attacker: number, target: number | null, mode: "basic" | "skill" | "ult") => Promise<void>;
+  ackCoin: () => Promise<void>;
+
+  // optional helpers (useful on lobby page)
+  createRoom?: (roomId: string) => Promise<void>;
+  joinRoom?: (roomId: string) => Promise<void>;
+};
+
+export function useGame(roomId: string): UseGameReturn {
+  const user = useMemo(loadOrCreateUser, []);
+  const [state, setState] = useState<ClientState | null>(null);
+
+  // role is derived from state.you ifมี (ตอนอยู่ในห้องแล้ว)
+  const role: "host" | "player" | "-" = useMemo(() => {
+    if (!state?.you) return "-";
+    return state.you === "p1" ? "host" : "player";
+  }, [state?.you]);
+
+  const refRoom = useRef(roomId);
   useEffect(() => {
-    if (!roomId) return;
-    void refresh();
-    if (pollRef.current) clearInterval(pollRef.current);
-    pollRef.current = setInterval(() => void refresh(), 1200);
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-      pollRef.current = null;
-    };
-  }, [roomId, refresh]);
+    refRoom.current = roomId;
+  }, [roomId]);
 
-  /* ---- room ops (หน้าแรก) ---- */
-  const createRoom = useCallback(async () => {
-    if (!roomId) throw new Error("Missing roomId");
-    const res = await apiCall<{ ok: true; roomId: string }>({ action: "createRoom", roomId, user });
-    return res.roomId;
-  }, [roomId, user]);
+  /* -------- actions -------- */
+  const fetchState = useCallback(async () => {
+    if (!refRoom.current) return;
+    const data = await postGame<ApiOk<{ state: ClientState }>>({
+      action: "getState",
+      roomId: refRoom.current,
+      userId: user.userId,
+    });
+    setState(data.state);
+  }, [user.userId]);
 
-  const joinRoom = useCallback(async () => {
-    if (!roomId) throw new Error("Missing roomId");
-    const res = await apiCall<{ ok: true; roomId: string }>({ action: "joinRoom", roomId, user });
-    return res.roomId;
-  }, [roomId, user]);
-
-  /* ---- in-game ops ---- */
   const ready = useCallback(async () => {
-    await apiCall({ action: "ready", roomId, user });
-    await refresh();
-  }, [roomId, user, refresh]);
-
-  const ackCoin = useCallback(async () => {
-    await apiCall({ action: "ackCoin", roomId, user });
-    await refresh();
-  }, [roomId, user, refresh]);
+    await postGame<ApiOk<{ state: ClientState }>>({
+      action: "ready",
+      roomId,
+      userId: user.userId,
+      user,
+    }).then((res) => setState(res.state));
+  }, [roomId, user]);
 
   const endPhase = useCallback(async () => {
-    await apiCall({ action: "endPhase", roomId, user });
-    await refresh();
-  }, [roomId, user, refresh]);
+    await postGame<ApiOk<{ state: ClientState }>>({
+      action: "endPhase",
+      roomId,
+      userId: user.userId,
+    }).then((res) => setState(res.state));
+  }, [roomId, user.userId]);
 
   const playCard = useCallback(
     async (index: number) => {
-      await apiCall({ action: "playCard", roomId, user, index });
-      await refresh();
+      await postGame<ApiOk<{ state: ClientState }>>({
+        action: "playCard",
+        roomId,
+        userId: user.userId,
+        index,
+      }).then((res) => setState(res.state));
     },
-    [roomId, user, refresh],
+    [roomId, user.userId],
   );
 
   const discardForInfinite = useCallback(
     async (index: number) => {
-      await apiCall({ action: "discardForInfinite", roomId, user, index });
-      await refresh();
+      await postGame<ApiOk<{ state: ClientState }>>({
+        action: "discardForInfinite",
+        roomId,
+        userId: user.userId,
+        index,
+      }).then((res) => setState(res.state));
     },
-    [roomId, user, refresh],
+    [roomId, user.userId],
   );
 
   const combat = useCallback(
     async (attacker: number, target: number | null, mode: "basic" | "skill" | "ult") => {
-      await apiCall({ action: "combat", roomId, user, attacker, target, mode });
-      await refresh();
+      await postGame<ApiOk<{ state: ClientState }>>({
+        action: "combat",
+        roomId,
+        userId: user.userId,
+        attacker,
+        target,
+        mode,
+      }).then((res) => setState(res.state));
     },
-    [roomId, user, refresh],
+    [roomId, user.userId],
   );
 
-  const you: Side | null = useMemo(() => {
-    const s = state;
-    if (!s) return null;
-    if (s.you) return s.you;
-    if (s.players?.p1?.name === user.name) return "p1";
-    if (s.players?.p2?.name === user.name) return "p2";
-    return null;
-  }, [state, user.name]);
+  const ackCoin = useCallback(async () => {
+    await postGame<ApiOk<{ state: ClientState }>>({
+      action: "ackCoin",
+      roomId,
+      userId: user.userId,
+    }).then((res) => setState(res.state));
+  }, [roomId, user.userId]);
+
+  // (optional) expose create/join forหน้า lobby
+  const createRoom = useCallback(
+    async (rid: string) => {
+      await postGame<ApiOk<{ roomId: string }>>({
+        action: "createRoom",
+        roomId: rid,
+        user,
+      });
+    },
+    [user],
+  );
+
+  const joinRoom = useCallback(
+    async (rid: string) => {
+      await postGame<ApiOk<{ roomId: string }>>({
+        action: "joinRoom",
+        roomId: rid,
+        user,
+      });
+    },
+    [user],
+  );
+
+  /* -------- polling -------- */
+  // 1) ดึงครั้งแรกเมื่อ mount/roomId เปลี่ยน
+  useEffect(() => {
+    if (!roomId) return;
+    let alive = true;
+    (async () => {
+      try {
+        const data = await postGame<ApiOk<{ state: ClientState }>>({
+          action: "getState",
+          roomId,
+          userId: user.userId,
+        });
+        if (alive) setState(data.state);
+      } catch (err) {
+        // swallow — ปล่อยให้ปุ่มกด action อื่น trigger fetch แทน
+        console.error("[getState:init] failed:", err);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [roomId, user.userId]);
+
+  // 2) interval poll (เบา ๆ) + focus/visibility
+  useEffect(() => {
+    if (!roomId) return;
+
+    const tick = () =>
+      postGame<ApiOk<{ state: ClientState }>>({
+        action: "getState",
+        roomId,
+        userId: user.userId,
+      })
+        .then((res) => setState(res.state))
+        .catch(() => {});
+
+    const iv = window.setInterval(tick, 3000);
+
+    const onVis = () => {
+      if (document.visibilityState === "visible") tick();
+    };
+    const onFocus = () => tick();
+
+    window.addEventListener("visibilitychange", onVis);
+    window.addEventListener("focus", onFocus);
+
+    return () => {
+      window.clearInterval(iv);
+      window.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [roomId, user.userId]);
 
   return {
-    state,
     role,
-    you,
-    refresh,
-    createRoom,
-    joinRoom,
+    user,
+    state,
+
     ready,
-    ackCoin,
     endPhase,
     playCard,
     discardForInfinite,
     combat,
+    ackCoin,
+
+    createRoom,
+    joinRoom,
   };
 }

@@ -463,7 +463,7 @@ export default function PlayRoomPage() {
     setPhaseShow(true);
     const t = setTimeout(() => setPhaseShow(false), 1800);
     return () => clearTimeout(t);
-  }, [cs]); // <-- ให้มี cs
+  }, [cs]); // เดิมอาจเป็น [cs?.phaseNo]
 
   // ปิดทอยเหรียญ แล้วค่อยโชว์ Phase #1
   const onCoinDone = () => {
