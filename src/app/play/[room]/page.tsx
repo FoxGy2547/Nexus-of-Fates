@@ -64,7 +64,7 @@ const ELEMENT_ICON: Record<string, string> = {
   Infinite: "/dice/infinite.png",
 };
 
-// code -> image path จาก cards.json (type ปลอดภัย)
+// code -> image path
 const CARD_IMG: Record<string, string> = Object.fromEntries(
   ([...cardsData.characters, ...cardsData.supports, ...cardsData.events] as Array<{
     code: string;
@@ -411,8 +411,10 @@ export default function PlayRoomPage() {
   const attUnit: UnitVM | null =
     yourSide != null && attacker != null ? cs?.board?.[yourSide]?.[attacker] ?? null : null;
 
-  const haveAny = (n: number) => (Object.values(yourDice as Record<string, number>) as number[]).reduce((a, b) => a + (b ?? 0), 0) >= n;
-  const canSpendEl = (el: string, need: number) => ((yourDice as Record<string, number>)[el] ?? 0) + ((yourDice as Record<string, number>).Infinite ?? 0) >= need;
+  const haveAny = (n: number) =>
+    (Object.values(yourDice as Record<string, number>) as number[]).reduce((a, b) => a + (b ?? 0), 0) >= n;
+  const canSpendEl = (el: string, need: number) =>
+    ((yourDice as Record<string, number>)[el] ?? 0) + ((yourDice as Record<string, number>).Infinite ?? 0) >= need;
 
   const canBasic = !!attUnit && haveAny(1);
   const canSkill = !!attUnit && canSpendEl(attUnit.element, 3);
@@ -439,9 +441,9 @@ export default function PlayRoomPage() {
 
   useEffect(() => {
     if (!cs || cs.mode !== "play") return;
-    if (!cs.coin?.decided) return;
+    if (!cs.coin?.decided) return; // โชว์เฉพาะตอนเพิ่งเริ่มเกม
     if (!yourSide) return;
-    if (coinShownRef.current) return;
+    if (coinShownRef.current) return; // กันเรียกซ้ำ
 
     coinShownRef.current = true;
     setCoinWinner(cs.turn);
@@ -461,12 +463,12 @@ export default function PlayRoomPage() {
     setPhaseShow(true);
     const t = setTimeout(() => setPhaseShow(false), 1800);
     return () => clearTimeout(t);
-  }, [cs]);
+  }, [cs?.phaseNo, cs?.mode]);
 
   // ปิดทอยเหรียญ แล้วค่อยโชว์ Phase #1
   const onCoinDone = () => {
     setCoinOpen(false);
-    ackCoin?.();
+    ackCoin?.(); // แจ้ง server
     setTimeout(() => {
       setPhaseShow(true);
       setTimeout(() => setPhaseShow(false), 1800);
@@ -479,7 +481,7 @@ export default function PlayRoomPage() {
   const actorName = actor ? (pInfo[actor]?.name || (actor === "p1" ? "Host" : "Player")) : "-";
   const actorAvatar = actor ? (pInfo[actor]?.avatar || null) : null;
 
-  // การกระทำ (โจมตีเท่านั้นที่เปลี่ยนเทิร์น ตามกติกาใหม่)
+  // ในกติกาปัจจุบัน: โจมตีเท่านั้นที่เปลี่ยนเทิร์น
   const alreadyEnded = yourSide ? !!cs?.endTurned?.[yourSide] : false;
   const isYourTurn = !!(actor && yourSide && actor === yourSide);
   const lockActions = !isYourTurn || alreadyEnded;
@@ -603,7 +605,7 @@ export default function PlayRoomPage() {
               >
                 Ultimate (5)
               </button>
-              {/* End Phase ยังมีไว้เผื่อ ในกติกาปัจจุบันโจมตีเท่านั้นที่เปลี่ยนเทิร์น */}
+              {/* End Phase ถูกปิดไว้ตามกติกาใหม่ (โจมตีเท่านั้นที่เปลี่ยนเทิร์น) */}
               <button className="px-3 py-1 rounded bg-emerald-700 opacity-40 cursor-not-allowed" disabled onClick={() => endPhase()}>
                 End Phase
               </button>

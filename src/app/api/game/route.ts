@@ -86,20 +86,15 @@ function buildPool(): mysql.Pool | null {
 }
 
 // singleton pool (dev hot-reload safety)
-const gPool = globalThis as typeof globalThis & {
-  __NOF_POOL__?: mysql.Pool | null;
-};
+type GPool = typeof globalThis & { __NOF_POOL__?: mysql.Pool | null };
+const gPool = globalThis as GPool;
 if (!gPool.__NOF_POOL__) {
-  try {
-    gPool.__NOF_POOL__ = buildPool();
-  } catch {
-    gPool.__NOF_POOL__ = null;
-  }
+  try { gPool.__NOF_POOL__ = buildPool(); } catch { gPool.__NOF_POOL__ = null; }
 }
 const pool: mysql.Pool | null = gPool.__NOF_POOL__;
 const DB_ON = !!pool;
 
-/** query one (typed, no any) */
+/** query one (typed) */
 async function qOne<T>(
   sql: string,
   params: (string | number | null | undefined)[] = [],
@@ -112,7 +107,7 @@ async function qOne<T>(
 
 /* ========================= Types & Room ========================= */
 
-type Side = "p1" | "p2";
+export type Side = "p1" | "p2";
 type DicePool = Record<string, number>;
 type UnitVM = {
   code: string;
@@ -147,13 +142,31 @@ type RoomState = {
   warnNoDeck?: string[];
 };
 
-// in-memory store rooms (singleton)
-const gStore = globalThis as typeof globalThis & {
-  __NOF_STORE__?: { rooms: Map<string, RoomState> };
-};
-if (!gStore.__NOF_STORE__) gStore.__NOF_STORE__ = { rooms: new Map<string, RoomState>() };
-const store = gStore.__NOF_STORE__!;
+/* ===== in-memory store (singleton) + per-room version, with upgrade-safe init ===== */
+type Store = { rooms: Map<string, RoomState>; versions: Map<string, number> };
+type GStore = typeof globalThis & { __NOF_STORE__?: Partial<Store> };
 
+const gStore = globalThis as GStore;
+if (!gStore.__NOF_STORE__) {
+  gStore.__NOF_STORE__ = { rooms: new Map<string, RoomState>(), versions: new Map<string, number>() };
+} else {
+  // ✅ อัปเกรดของเก่าให้ครบ field เสมอ (กัน hot-reload เจอ undefined)
+  if (!gStore.__NOF_STORE__.rooms) gStore.__NOF_STORE__.rooms = new Map<string, RoomState>();
+  if (!gStore.__NOF_STORE__.versions) gStore.__NOF_STORE__.versions = new Map<string, number>();
+}
+const store = gStore.__NOF_STORE__ as Store;
+
+/* ---- version helpers ---- */
+function getVersion(roomId: string): number {
+  return store.versions.get(roomId) ?? 0;
+}
+function bumpVersion(roomId: string): number {
+  const v = getVersion(roomId) + 1;
+  store.versions.set(roomId, v);
+  return v;
+}
+
+/* ---- room helpers ---- */
 function ensureRoom(id: string): RoomState {
   let r = store.rooms.get(id);
   if (!r) {
@@ -176,6 +189,7 @@ function ensureRoom(id: string): RoomState {
       dice: { p1: {}, p2: {} },
     };
     store.rooms.set(id, r);
+    bumpVersion(id);
   }
   return r;
 }
@@ -189,16 +203,7 @@ function sideOf(room: RoomState, userId: string): Side | null {
 /* ========================= Cards helpers ========================= */
 
 const ELEMENTS = [
-  "Pyro",
-  "Hydro",
-  "Cryo",
-  "Electro",
-  "Geo",
-  "Anemo",
-  "Quantum",
-  "Imaginary",
-  "Neutral",
-  "Infinite",
+  "Pyro","Hydro","Cryo","Electro","Geo","Anemo","Quantum","Imaginary","Neutral","Infinite",
 ] as const;
 type ElementKind = (typeof ELEMENTS)[number];
 
@@ -234,15 +239,14 @@ function addDie(poolD: DicePool, el: ElementKind, n = 1) {
 function spendAny(poolD: DicePool, n: number): boolean {
   const total = Object.values(poolD).reduce((a, b) => a + (b ?? 0), 0);
   if (total < n) return false;
-  while (n-- > 0) {
-    if ((poolD.Infinite ?? 0) > 0) {
-      poolD.Infinite--;
-      continue;
-    }
+  let remain = n;
+  while (remain > 0) {
+    if ((poolD.Infinite ?? 0) > 0) { poolD.Infinite = (poolD.Infinite ?? 0) - 1; remain--; continue; }
     const keys = Object.keys(poolD) as ElementKind[];
     const k = keys.find((key) => (poolD[key] ?? 0) > 0);
     if (!k) return false;
     poolD[k] = (poolD[k] ?? 0) - 1;
+    remain--;
   }
   return true;
 }
@@ -374,6 +378,8 @@ async function startGame(room: RoomState) {
   room.coinAck = { p1: false, p2: false };
   room.turn = win;
   room.phaseActor = win;
+
+  bumpVersion(room.id);
 }
 
 /* ========================= State to client ========================= */
@@ -447,8 +453,9 @@ function createRoom(roomId: string, user: PlayerInfo) {
   const room = ensureRoom(id);
   if (!room.players.p1 && !room.players.p2) {
     room.players.p1 = user; // host เป็น p1 เสมอ
+    bumpVersion(id);
   }
-  return { ok: true, roomId: id };
+  return { ok: true, roomId: id, version: getVersion(id) };
 }
 
 function joinRoom(roomId: string, user: PlayerInfo) {
@@ -457,30 +464,25 @@ function joinRoom(roomId: string, user: PlayerInfo) {
   const s = sideOf(room, user.userId);
   if (s) {
     room.players[s] = user;
-    return { ok: true, roomId: id };
+    bumpVersion(id);
+    return { ok: true, roomId: id, version: getVersion(id) };
   }
-  if (!room.players.p1) {
-    room.players.p1 = user;
-    return { ok: true, roomId: id };
-  }
-  if (!room.players.p2) {
-    room.players.p2 = user;
-    return { ok: true, roomId: id };
-  }
+  if (!room.players.p1) { room.players.p1 = user; bumpVersion(id); return { ok: true, roomId: id, version: getVersion(id) }; }
+  if (!room.players.p2) { room.players.p2 = user; bumpVersion(id); return { ok: true, roomId: id, version: getVersion(id) }; }
   throw new Error("Room is full");
 }
 
 function markReady(room: RoomState, userId: string) {
   const s = sideOf(room, userId);
   if (!s) throw new Error("Not in room");
-  room.ready[s] = true;
+  if (!room.ready[s]) { room.ready[s] = true; bumpVersion(room.id); }
 }
 
 function ackCoin(room: RoomState, userId: string) {
   const s = sideOf(room, userId);
   if (!s) return;
   if (!room.coin.decided) return;
-  room.coinAck[s] = true;
+  if (!room.coinAck[s]) { room.coinAck[s] = true; bumpVersion(room.id); }
 }
 
 function endTurn(room: RoomState, userId: string) {
@@ -489,6 +491,7 @@ function endTurn(room: RoomState, userId: string) {
   if (room.turn !== s) return;
   room.turn = s === "p1" ? "p2" : "p1";
   room.phaseActor = room.turn;
+  bumpVersion(room.id);
 }
 
 function endPhase(room: RoomState, userId: string) {
@@ -503,6 +506,7 @@ function endPhase(room: RoomState, userId: string) {
   if (!(room.endTurned.p1 && room.endTurned.p2)) {
     room.turn = s === "p1" ? "p2" : "p1";
     room.phaseActor = room.turn;
+    bumpVersion(room.id);
     return;
   }
 
@@ -517,6 +521,7 @@ function endPhase(room: RoomState, userId: string) {
   // จบเฟสแล้วจั่ว +2
   draw(room, "p1", 2);
   draw(room, "p2", 2);
+  bumpVersion(room.id);
 }
 
 function playCard(room: RoomState, userId: string, handIndex: number) {
@@ -529,6 +534,7 @@ function playCard(room: RoomState, userId: string, handIndex: number) {
   // ถ้ามี character หลุดมา → ทิ้งเฉย ๆ
   if (allChars().some((c) => c.code === card)) {
     room.hand[s].splice(handIndex, 1);
+    bumpVersion(room.id);
     return;
   }
 
@@ -538,6 +544,7 @@ function playCard(room: RoomState, userId: string, handIndex: number) {
     room.board[s].forEach((u) => (u.hp += 2));
   }
   room.hand[s].splice(handIndex, 1);
+  bumpVersion(room.id);
 }
 
 function discardForInfinite(room: RoomState, userId: string, handIndex: number) {
@@ -548,6 +555,7 @@ function discardForInfinite(room: RoomState, userId: string, handIndex: number) 
   if (!card) return;
   room.hand[s].splice(handIndex, 1);
   addDie(room.dice[s], "Infinite", 1);
+  bumpVersion(room.id);
 }
 
 function combat(
@@ -601,22 +609,26 @@ function combat(
 
   // จบเทิร์นเฉพาะการต่อสู้
   passTurnAfterCombat(room, s);
+  bumpVersion(room.id);
 }
 
 /* ========================= HTTP ========================= */
 
+type GetStateBody = {
+  action?: string;
+  roomId?: string;
+  userId?: string;
+  user?: PlayerInfo;
+  index?: number;
+  attacker?: number;
+  target?: number | null;
+  mode?: "basic" | "skill" | "ult";
+  sinceVersion?: number;
+};
+
 export async function POST(req: Request) {
   try {
-    const body = (await req.json().catch(() => ({}))) as {
-      action?: string;
-      roomId?: string;
-      userId?: string;
-      user?: PlayerInfo;
-      index?: number;
-      attacker?: number;
-      target?: number | null;
-      mode?: "basic" | "skill" | "ult";
-    };
+    const body = (await req.json().catch(() => ({}))) as GetStateBody;
 
     const action = String(body?.action || "");
     const roomId = String(body?.roomId || "").toUpperCase();
@@ -642,14 +654,18 @@ export async function POST(req: Request) {
 
     switch (action) {
       case "getState": {
+        const clientVer = Number(body.sinceVersion ?? 0);
+        const currentVer = getVersion(roomId);
+        if (clientVer >= currentVer) {
+          return new NextResponse(null, { status: 204 });
+        }
         const uid = String(body.userId || "");
-        return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
+        return NextResponse.json({ ok: true, version: currentVer, state: stateForClient(room, uid) });
       }
 
       case "ready": {
         const uid = String((body.user as PlayerInfo)?.userId || body.userId || "");
         if (!uid) throw new Error("Missing userId");
-
         markReady(room, uid);
 
         const missing = await checkMissingDecks(room);
@@ -658,40 +674,45 @@ export async function POST(req: Request) {
         if (room.ready.p1 && room.ready.p2 && room.mode !== "play") {
           await startGame(room);
         }
-
-        return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
+        const v = getVersion(roomId);
+        return NextResponse.json({ ok: true, version: v, state: stateForClient(room, uid) });
       }
 
       case "ackCoin": {
         const uid = String((body.user as PlayerInfo)?.userId || body.userId || "");
         if (uid) ackCoin(room, uid);
-        return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
+        const v = getVersion(roomId);
+        return NextResponse.json({ ok: true, version: v, state: stateForClient(room, uid) });
       }
 
       case "endTurn": {
         const uid = String((body.user as PlayerInfo)?.userId || body.userId || "");
         endTurn(room, uid);
-        return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
+        const v = getVersion(roomId);
+        return NextResponse.json({ ok: true, version: v, state: stateForClient(room, uid) });
       }
 
       case "endPhase": {
         const uid = String((body.user as PlayerInfo)?.userId || body.userId || "");
         endPhase(room, uid);
-        return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
+        const v = getVersion(roomId);
+        return NextResponse.json({ ok: true, version: v, state: stateForClient(room, uid) });
       }
 
       case "playCard": {
         const uid = String((body.user as PlayerInfo)?.userId || body.userId || "");
         const handIndex = Number(body.index ?? 0);
         playCard(room, uid, handIndex);
-        return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
+        const v = getVersion(roomId);
+        return NextResponse.json({ ok: true, version: v, state: stateForClient(room, uid) });
       }
 
       case "discardForInfinite": {
         const uid = String((body.user as PlayerInfo)?.userId || body.userId || "");
         const handIndex = Number(body.index ?? 0);
         discardForInfinite(room, uid, handIndex);
-        return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
+        const v = getVersion(roomId);
+        return NextResponse.json({ ok: true, version: v, state: stateForClient(room, uid) });
       }
 
       case "combat": {
@@ -700,7 +721,8 @@ export async function POST(req: Request) {
         const target = body.target == null ? null : Number(body.target);
         const mode = String(body.mode ?? "basic") as "basic" | "skill" | "ult";
         combat(room, uid, attacker, target, mode);
-        return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
+        const v = getVersion(roomId);
+        return NextResponse.json({ ok: true, version: v, state: stateForClient(room, uid) });
       }
 
       default:

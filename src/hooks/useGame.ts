@@ -5,62 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSession } from "next-auth/react";
 import type { Session } from "next-auth";
 
-/* ===================== helpers ===================== */
-async function post<T>(body: unknown): Promise<T> {
-  const res = await fetch("/api/game", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    cache: "no-store",
-    body: JSON.stringify(body),
-  });
-
-  const raw = await res.text().catch(() => "");
-  let json: unknown = null;
-  try {
-    json = raw ? JSON.parse(raw) : null;
-  } catch {
-    /* ignore */
-  }
-
-  if (!res.ok) {
-    const msg =
-      ((json as { error?: string } | null)?.error) ??
-      (raw || res.statusText || "Request failed");
-    throw new Error(msg);
-  }
-  return (json as T) ?? ({} as T);
-}
-
-/** สุ่มไอดีแบบ type-safe (ใช้ crypto.randomUUID ถ้ามี) */
-function safeRandomId(): string {
-  if (typeof globalThis !== "undefined" && "crypto" in globalThis) {
-    const c = (globalThis as { crypto?: Crypto }).crypto;
-    if (c && typeof c.randomUUID === "function") {
-      return c.randomUUID();
-    }
-  }
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-/** เสถียรทั้งแอป: auth.id > email > guestId (localStorage) */
-function stableUserId(session: Session | null | undefined): string {
-  if (typeof window === "undefined") return "ssr";
-  const authId =
-    (session?.user as { id?: string | null } | undefined)?.id ??
-    session?.user?.email ??
-    null;
-  if (authId) return String(authId);
-
-  const key = "NOF_guestId";
-  let id = localStorage.getItem(key);
-  if (!id) {
-    id = safeRandomId();
-    localStorage.setItem(key, id);
-  }
-  return id;
-}
-
-/* ===================== shared types (client) ===================== */
+/* =============== types shared กับ API =============== */
 export type Side = "p1" | "p2";
 export type DicePool = Record<string, number>;
 export type UnitVM = {
@@ -73,6 +18,7 @@ export type UnitVM = {
 export type ClientState = {
   mode?: "lobby" | "play";
   coin?: { decided: boolean; winner?: Side };
+  coinAck?: Record<Side, boolean>;
   turn: Side;
   phaseNo?: number;
   phaseActor?: Side;
@@ -83,13 +29,64 @@ export type ClientState = {
   hand: Record<Side, string[]>;
   ready?: { p1: boolean; p2: boolean };
   players?: Partial<Record<Side, { name?: string | null; avatar?: string | null }>>;
-  you?: Side; // เซิร์ฟเวอร์บอกฝั่งเรา
+  you?: Side; // ฝั่งของเรา (ให้เซิร์ฟเวอร์บอก)
 };
 
-/* ===================== the hook ===================== */
+type ApiOk<T> = { ok: true } & T;
+type ApiError = { error: string };
+
+/* =============== helpers =============== */
+
+/** userId เสถียรทั้งแอป (auth.id > email > guestId localStorage) */
+function stableUserId(session: Session | null | undefined): string {
+  if (typeof window === "undefined") return "ssr";
+  const authId =
+    (session?.user as { id?: string | null } | undefined)?.id ??
+    session?.user?.email ??
+    null;
+  if (authId) return String(authId);
+
+  const key = "NOF_guestId";
+  const existing = window.localStorage.getItem(key);
+  if (existing) return existing;
+
+  // สร้าง guest id ใหม่แบบไม่ใช้ any
+  let rnd: string;
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    rnd = crypto.randomUUID() as string;
+  } else {
+    rnd = `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+  }
+  window.localStorage.setItem(key, rnd);
+  return rnd;
+}
+
+/** POST ไป /api/game และคืน status + data (รองรับ 204) */
+async function postApi<T>(
+  body: Record<string, unknown>,
+): Promise<{ status: number; data?: T; text?: string }> {
+  const res = await fetch("/api/game", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+  if (res.status === 204) return { status: 204 };
+
+  const text = await res.text().catch(() => "");
+  let json: unknown = null;
+  try {
+    json = text ? (JSON.parse(text) as unknown) : null;
+  } catch {
+    /* ignore parse error */
+  }
+  return { status: res.status, data: json as T | undefined, text };
+}
+
+/* =============== hook หลัก =============== */
 export function useGame(roomIdRaw: string) {
   const { data: session } = useSession();
-  const roomId = String(roomIdRaw || "").toUpperCase();
+  const roomId = useMemo(() => String(roomIdRaw || "").toUpperCase(), [roomIdRaw]);
 
   const userId = useMemo(() => stableUserId(session), [session]);
   const user = useMemo(
@@ -104,139 +101,181 @@ export function useGame(roomIdRaw: string) {
   const [state, setState] = useState<ClientState | null>(null);
   const [role, setRole] = useState<"host" | "player" | null>(null);
 
-  // hint role จาก localStorage
+  // เวอร์ชัน state ล่าสุดจากเซิร์ฟเวอร์ (ใช้สำหรับ polling แบบ sinceVersion)
+  const versionRef = useRef<number>(0);
+
+  // เดางาน role จาก localStorage (ให้ UI เสถียรตอนโหลดครั้งแรก)
   useEffect(() => {
     if (typeof window === "undefined") return;
     const key = `NOF_role:${roomId}`;
-    const v = localStorage.getItem(key);
-    if (v === "host" || v === "player") setRole(v);
+    const saved = window.localStorage.getItem(key);
+    if (saved === "host" || saved === "player") setRole(saved);
   }, [roomId]);
 
-  // handshake ให้แน่ใจว่า API พร้อม
+  // hello (warm up function)
   useEffect(() => {
-    void post<{ ok: boolean; time: number }>({ action: "hello" }).catch(() => undefined);
+    void postApi<ApiOk<{ time: number; version: number; db: string }>>({ action: "hello" });
   }, []);
 
-  // เข้าร่วมห้องอัตโนมัติ (ครั้งเดียว/ต่อ roomId)
+  // join room อัตโนมัติครั้งแรก
   const joinedRef = useRef(false);
   useEffect(() => {
     if (!roomId || joinedRef.current) return;
     joinedRef.current = true;
-    void post<{ ok: boolean; roomId: string }>({
+    void postApi<ApiOk<{ roomId: string; version: number }>>({
       action: "joinRoom",
       roomId,
-      user, // { userId, name, avatar }
-    }).catch(() => undefined);
+      user,
+    });
   }, [roomId, user]);
 
-  // pull state แบบ polling
-  const pollingRef = useRef<number | null>(null);
-  const pull = useCallback(async () => {
-    if (!roomId) return;
-    try {
-      const res = await post<{ ok: true; state: ClientState }>({
-        action: "getState",
-        roomId,
-        userId, // ให้ server ระบุ you
-      });
-      setState(res.state);
+  /* =============== polling แบบ backoff + sinceVersion =============== */
+  const stopPollRef = useRef(false);
+  useEffect(() => {
+    stopPollRef.current = false;
+    return () => {
+      stopPollRef.current = true;
+    };
+  }, [roomId]);
 
-      // ถ้า server บอก you → ตั้ง role ให้ทันที
-      const you = res.state.you;
+  const pullOnce = useCallback(async () => {
+    if (!roomId) return false;
+
+    const res = await postApi<
+      ApiOk<{ version: number; state: ClientState }> | ApiError
+    >({
+      action: "getState",
+      roomId,
+      userId,
+      sinceVersion: versionRef.current || 0,
+    });
+
+    // 204 = ไม่มีการเปลี่ยนแปลง
+    if (res.status === 204) return false;
+
+    if (res.status >= 200 && res.status < 300 && res.data && "ok" in res.data) {
+      const payload = res.data as ApiOk<{ version: number; state: ClientState }>;
+      versionRef.current = payload.version;
+      setState(payload.state);
+
+      // ให้ server เป็นตัวจริงเรื่องฝั่งเรา → อัปเดต role
+      const you = payload.state.you;
       if (you) {
-        const r: "host" | "player" = you === "p1" ? "host" : "player";
-        if (role !== r) {
-          setRole(r);
+        const newRole = you === "p1" ? "host" : "player";
+        if (role !== newRole) {
+          setRole(newRole);
           if (typeof window !== "undefined") {
-            localStorage.setItem(`NOF_role:${roomId}`, r);
+            window.localStorage.setItem(`NOF_role:${roomId}`, newRole);
           }
         }
       }
-    } catch {
-      /* noop */
+      return true;
     }
+
+    // error payload
+    if (res.data && "error" in (res.data as ApiError)) {
+      // eslint-disable-next-line no-console
+      console.warn("getState error:", (res.data as ApiError).error);
+    }
+    return false;
   }, [roomId, userId, role]);
 
   useEffect(() => {
     if (!roomId) return;
-    void pull(); // ครั้งแรก
-    if (pollingRef.current) {
-      clearInterval(pollingRef.current);
-    }
-    pollingRef.current = window.setInterval(pull, 900);
-    return () => {
-      if (pollingRef.current) {
-        clearInterval(pollingRef.current);
-      }
-      pollingRef.current = null;
-    };
-  }, [roomId, pull]);
 
-  /* ========== action wrappers ========== */
+    let delay = 700; // เริ่มด้วย ~0.7s
+    let timer: number | null = null;
+
+    const loop = async () => {
+      if (stopPollRef.current) return;
+
+      const changed = await pullOnce();
+      // ถ้า state เปลี่ยน → รีเซ็ตดีเลย์ให้ตอบสนองไวขึ้น
+      if (changed) delay = 700;
+      else delay = Math.min(delay * 1.4, 5000); // backoff สูงสุด 5s
+
+      timer = window.setTimeout(loop, delay);
+    };
+
+    // kick off
+    void loop();
+
+    return () => {
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [roomId, pullOnce]);
+
+  /* =============== action wrappers =============== */
+  // ทุก action จะเซฟเวอร์ชันใหม่ → ดึงซ้ำครั้งเดียว
+  const refresh = useCallback(async () => {
+    await pullOnce();
+  }, [pullOnce]);
+
   const ready = useCallback(async () => {
-    await post<{ ok: boolean; state: ClientState }>({
+    await postApi<ApiOk<{ version: number; state: ClientState }> | ApiError>({
       action: "ready",
       roomId,
       user,
     });
-    await pull();
-  }, [roomId, user, pull]);
+    await refresh();
+  }, [roomId, user, refresh]);
 
   const ackCoin = useCallback(async () => {
-    await post<{ ok: boolean }>({
+    await postApi<ApiOk<{ version: number; state: ClientState }> | ApiError>({
       action: "ackCoin",
       roomId,
       userId,
     });
-  }, [roomId, userId]);
+    await refresh();
+  }, [roomId, userId, refresh]);
 
   const endTurn = useCallback(async () => {
-    await post<{ ok: boolean; state: ClientState }>({
+    await postApi<ApiOk<{ version: number; state: ClientState }> | ApiError>({
       action: "endTurn",
       roomId,
       userId,
     });
-    await pull();
-  }, [roomId, userId, pull]);
+    await refresh();
+  }, [roomId, userId, refresh]);
 
   const endPhase = useCallback(async () => {
-    await post<{ ok: boolean; state: ClientState }>({
+    await postApi<ApiOk<{ version: number; state: ClientState }> | ApiError>({
       action: "endPhase",
       roomId,
       userId,
     });
-    await pull();
-  }, [roomId, userId, pull]);
+    await refresh();
+  }, [roomId, userId, refresh]);
 
   const playCard = useCallback(
     async (index: number) => {
-      await post<{ ok: boolean; state: ClientState }>({
+      await postApi<ApiOk<{ version: number; state: ClientState }> | ApiError>({
         action: "playCard",
         roomId,
         userId,
         index,
       });
-      await pull();
+      await refresh();
     },
-    [roomId, userId, pull],
+    [roomId, userId, refresh],
   );
 
   const discardForInfinite = useCallback(
     async (index: number) => {
-      await post<{ ok: boolean; state: ClientState }>({
+      await postApi<ApiOk<{ version: number; state: ClientState }> | ApiError>({
         action: "discardForInfinite",
         roomId,
         userId,
         index,
       });
-      await pull();
+      await refresh();
     },
-    [roomId, userId, pull],
+    [roomId, userId, refresh],
   );
 
   const combat = useCallback(
     async (attacker: number, target: number | null, mode: "basic" | "skill" | "ult") => {
-      await post<{ ok: boolean; state: ClientState }>({
+      await postApi<ApiOk<{ version: number; state: ClientState }> | ApiError>({
         action: "combat",
         roomId,
         userId,
@@ -244,9 +283,9 @@ export function useGame(roomIdRaw: string) {
         target,
         mode,
       });
-      await pull();
+      await refresh();
     },
-    [roomId, userId, pull],
+    [roomId, userId, refresh],
   );
 
   return {
