@@ -3,8 +3,7 @@ import { NextResponse } from "next/server";
 import mysql from "mysql2/promise";
 import cardsDataJson from "@/data/cards.json";
 
-/* ========================= Cards types & helpers ========================= */
-
+/* ========================= Cards types ========================= */
 type CharacterCard = {
   char_id: number;
   code: string;
@@ -41,8 +40,7 @@ type CardsData = {
 };
 const cardsData = cardsDataJson as CardsData;
 
-/* ========================= DB ========================= */
-
+/* ========================= DB pool ========================= */
 function buildPool(): mysql.Pool | null {
   const {
     MYSQL_HOST,
@@ -58,12 +56,9 @@ function buildPool(): mysql.Pool | null {
     DATABASE_URL,
   } = process.env as Record<string, string | undefined>;
 
+  // connection string e.g. mysql://user:pass@host:3306/dbname
   if (DATABASE_URL) {
-    return mysql.createPool({
-      uri: DATABASE_URL,
-      waitForConnections: true,
-      connectionLimit: 10,
-    });
+    return mysql.createPool(DATABASE_URL);
   }
 
   const host = MYSQL_HOST ?? DB_HOST;
@@ -71,7 +66,6 @@ function buildPool(): mysql.Pool | null {
   const password = MYSQL_PASSWORD ?? DB_PASS;
   const database = MYSQL_DATABASE ?? DB_NAME;
   const port = Number(MYSQL_PORT ?? DB_PORT ?? 3306);
-
   if (!host || !user || !database) return null;
 
   return mysql.createPool({
@@ -85,29 +79,21 @@ function buildPool(): mysql.Pool | null {
   });
 }
 
-// singleton pool (dev hot-reload safety)
-type GPool = typeof globalThis & { __NOF_POOL__?: mysql.Pool | null };
-const gPool = globalThis as GPool;
-if (!gPool.__NOF_POOL__) {
-  try { gPool.__NOF_POOL__ = buildPool(); } catch { gPool.__NOF_POOL__ = null; }
+// global singletons (สำหรับ dev hot-reload)
+type GlobalWithPool = typeof globalThis & { __NOF_POOL__?: mysql.Pool | null };
+const gp = globalThis as GlobalWithPool;
+if (!gp.__NOF_POOL__) {
+  try {
+    gp.__NOF_POOL__ = buildPool();
+  } catch {
+    gp.__NOF_POOL__ = null;
+  }
 }
-const pool: mysql.Pool | null = gPool.__NOF_POOL__;
+const pool: mysql.Pool | null = gp.__NOF_POOL__;
 const DB_ON = !!pool;
 
-/** query one (typed) */
-async function qOne<T>(
-  sql: string,
-  params: (string | number | null | undefined)[] = [],
-): Promise<T | null> {
-  if (!pool) return null;
-  const [rows] = await pool.query<mysql.RowDataPacket[]>(sql, params);
-  const first = rows[0] as unknown as T | undefined;
-  return first ?? null;
-}
-
 /* ========================= Types & Room ========================= */
-
-export type Side = "p1" | "p2";
+type Side = "p1" | "p2";
 type DicePool = Record<string, number>;
 type UnitVM = {
   code: string;
@@ -142,69 +128,91 @@ type RoomState = {
   warnNoDeck?: string[];
 };
 
-/* ===== in-memory store (singleton) + per-room version, with upgrade-safe init ===== */
-type Store = { rooms: Map<string, RoomState>; versions: Map<string, number> };
-type GStore = typeof globalThis & { __NOF_STORE__?: Partial<Store> };
+/* ========================= Local fallback store ========================= */
+type GlobalWithStore = typeof globalThis & { __NOF_STORE__?: Map<string, { version: number; state: RoomState }> };
+const gs = globalThis as GlobalWithStore;
+if (!gs.__NOF_STORE__) gs.__NOF_STORE__ = new Map();
 
-const gStore = globalThis as GStore;
-if (!gStore.__NOF_STORE__) {
-  gStore.__NOF_STORE__ = { rooms: new Map<string, RoomState>(), versions: new Map<string, number>() };
-} else {
-  // ✅ อัปเกรดของเก่าให้ครบ field เสมอ (กัน hot-reload เจอ undefined)
-  if (!gStore.__NOF_STORE__.rooms) gStore.__NOF_STORE__.rooms = new Map<string, RoomState>();
-  if (!gStore.__NOF_STORE__.versions) gStore.__NOF_STORE__.versions = new Map<string, number>();
-}
-const store = gStore.__NOF_STORE__ as Store;
+/* ========================= Room persistence (DB + fallback) ========================= */
+type RoomRow = { id: string; version: number; state_json: string };
 
-/* ---- version helpers ---- */
-function getVersion(roomId: string): number {
-  return store.versions.get(roomId) ?? 0;
-}
-function bumpVersion(roomId: string): number {
-  const v = getVersion(roomId) + 1;
-  store.versions.set(roomId, v);
-  return v;
+function freshRoom(id: string): RoomState {
+  return {
+    id,
+    mode: "lobby",
+    players: {},
+    ready: { p1: false, p2: false },
+    coin: { decided: false },
+    coinAck: { p1: false, p2: false },
+    phaseNo: 0,
+    turn: "p1",
+    phaseActor: "p1",
+    endTurned: { p1: false, p2: false },
+    phaseEndOrder: [],
+    hero: { p1: 30, p2: 30 },
+    board: { p1: [], p2: [] },
+    hand: { p1: [], p2: [] },
+    deck: { p1: [], p2: [] },
+    dice: { p1: {}, p2: {} },
+  };
 }
 
-/* ---- room helpers ---- */
-function ensureRoom(id: string): RoomState {
-  let r = store.rooms.get(id);
-  if (!r) {
-    r = {
-      id,
-      mode: "lobby",
-      players: {},
-      ready: { p1: false, p2: false },
-      coin: { decided: false },
-      coinAck: { p1: false, p2: false },
-      phaseNo: 0,
-      turn: "p1",
-      phaseActor: "p1",
-      endTurned: { p1: false, p2: false },
-      phaseEndOrder: [],
-      hero: { p1: 30, p2: 30 },
-      board: { p1: [], p2: [] },
-      hand: { p1: [], p2: [] },
-      deck: { p1: [], p2: [] },
-      dice: { p1: {}, p2: {} },
-    };
-    store.rooms.set(id, r);
-    bumpVersion(id);
+async function loadRoom(roomId: string): Promise<{ state: RoomState; version: number }> {
+  const id = roomId.toUpperCase();
+
+  if (DB_ON && pool) {
+    const [rows] = await pool.query<mysql.RowDataPacket[]>("SELECT id, version, state_json FROM rooms WHERE id = ? LIMIT 1", [id]);
+    const row = rows[0] as RoomRow | undefined;
+    if (row) {
+      const state = JSON.parse(row.state_json) as RoomState;
+      return { state, version: Number(row.version) };
+    }
+    // not found → insert fresh
+    const state = freshRoom(id);
+    await pool.query("INSERT INTO rooms (id, version, state_json) VALUES (?, 1, ?)", [id, JSON.stringify(state)]);
+    return { state, version: 1 };
   }
-  return r;
+
+  // fallback (dev)
+  const local = gs.__NOF_STORE__!.get(id);
+  if (local) return { state: local.state, version: local.version };
+  const state = freshRoom(id);
+  gs.__NOF_STORE__!.set(id, { version: 1, state });
+  return { state, version: 1 };
 }
 
-function sideOf(room: RoomState, userId: string): Side | null {
-  if (room.players.p1?.userId === userId) return "p1";
-  if (room.players.p2?.userId === userId) return "p2";
-  return null;
+async function saveRoom(roomId: string, nextState: RoomState, prevVersion: number, retry = 0): Promise<{ version: number }> {
+  const id = roomId.toUpperCase();
+
+  if (DB_ON && pool) {
+    const [res] = await pool.query<mysql.ResultSetHeader>(
+      "UPDATE rooms SET state_json = ?, version = version + 1, updated_at = NOW() WHERE id = ? AND version = ?",
+      [JSON.stringify(nextState), id, prevVersion],
+    );
+    if (res.affectedRows === 0) {
+      // version conflict → reload once or twice
+      if (retry >= 2) throw new Error("Conflict: room was updated concurrently");
+      const { state, version } = await loadRoom(id);
+      // merge strategy: last writer wins (ใช้ state ล่าสุดเป็นฐานแล้วค่อยๆทำซ้ำฝั่ง caller ถ้าต้องการก็ทำ แต่ตอนนี้เขียนทับ)
+      // สำหรับเกมเทิร์นเบส ขอให้ caller เรียกซ้ำ action เดิม
+      return saveRoom(id, nextState, version, retry + 1);
+    }
+    return { version: prevVersion + 1 };
+  }
+
+  // fallback (dev)
+  const cur = gs.__NOF_STORE__!.get(id);
+  const curVer = cur?.version ?? 1;
+  if (cur && curVer !== prevVersion) {
+    if (retry >= 2) throw new Error("Conflict (local)");
+    return saveRoom(id, nextState, curVer, retry + 1);
+  }
+  gs.__NOF_STORE__!.set(id, { version: prevVersion + 1, state: nextState });
+  return { version: prevVersion + 1 };
 }
 
-/* ========================= Cards helpers ========================= */
-
-const ELEMENTS = [
-  "Pyro","Hydro","Cryo","Electro","Geo","Anemo","Quantum","Imaginary","Neutral","Infinite",
-] as const;
+/* ========================= Utilities ========================= */
+const ELEMENTS = ["Pyro", "Hydro", "Cryo", "Electro", "Geo", "Anemo", "Quantum", "Imaginary", "Neutral", "Infinite"] as const;
 type ElementKind = (typeof ELEMENTS)[number];
 
 function shuffle<T>(arr: T[]) {
@@ -214,10 +222,9 @@ function shuffle<T>(arr: T[]) {
   }
   return arr;
 }
-
-const allChars = (): CharacterCard[] => cardsData.characters ?? [];
-const allSupports = (): SupportCard[] => cardsData.supports ?? [];
-const allEvents = (): EventCard[] => cardsData.events ?? [];
+const allChars = (): CharacterCard[] => cardsData.characters;
+const allSupports = (): SupportCard[] => cardsData.supports;
+const allEvents = (): EventCard[] => cardsData.events;
 
 function toUnit(code: string): UnitVM | null {
   const ch = allChars().find((c) => c.code === code);
@@ -232,7 +239,6 @@ function draw(room: RoomState, side: Side, n: number) {
     room.hand[side].push(code);
   }
 }
-
 function addDie(poolD: DicePool, el: ElementKind, n = 1) {
   poolD[el] = (poolD[el] ?? 0) + n;
 }
@@ -240,10 +246,13 @@ function spendAny(poolD: DicePool, n: number): boolean {
   const total = Object.values(poolD).reduce((a, b) => a + (b ?? 0), 0);
   if (total < n) return false;
   let remain = n;
+  const inf = Math.min(poolD.Infinite ?? 0, remain);
+  if (inf > 0) {
+    poolD.Infinite = (poolD.Infinite ?? 0) - inf;
+    remain -= inf;
+  }
   while (remain > 0) {
-    if ((poolD.Infinite ?? 0) > 0) { poolD.Infinite = (poolD.Infinite ?? 0) - 1; remain--; continue; }
-    const keys = Object.keys(poolD) as ElementKind[];
-    const k = keys.find((key) => (poolD[key] ?? 0) > 0);
+    const k = (Object.keys(poolD) as ElementKind[]).find((x) => (poolD[x] ?? 0) > 0);
     if (!k) return false;
     poolD[k] = (poolD[k] ?? 0) - 1;
     remain--;
@@ -260,13 +269,22 @@ function spendElement(poolD: DicePool, el: ElementKind, n: number): boolean {
   return true;
 }
 
-/* ========================= DB: users/decks ========================= */
+function sideOf(room: RoomState, userId: string): Side | null {
+  if (room.players.p1?.userId === userId) return "p1";
+  if (room.players.p2?.userId === userId) return "p2";
+  return null;
+}
 
+/* ========================= DB: users/decks (optional) ========================= */
 type UserRow = { id: number; username?: string | null };
-
+async function qOne<T>(sql: string, params: (string | number | null | undefined)[] = []): Promise<T | null> {
+  if (!pool) return null;
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(sql, params);
+  const first = rows[0] as unknown as T | undefined;
+  return first ?? null;
+}
 async function findUserRowByAny(key: string, display?: string | null): Promise<UserRow | null> {
   if (!DB_ON || !pool) return null;
-
   if (/^\d{6,}$/.test(key)) {
     const u = await qOne<UserRow>("SELECT id, username FROM users WHERE discord_id = ? LIMIT 1", [key]);
     if (u) return u;
@@ -279,7 +297,6 @@ async function findUserRowByAny(key: string, display?: string | null): Promise<U
   const u = await qOne<UserRow>("SELECT id, username FROM users WHERE username = ? LIMIT 1", [name]);
   return u ?? null;
 }
-
 type DeckRow = {
   id: number;
   user_id: number;
@@ -287,10 +304,8 @@ type DeckRow = {
   card_char1?: number | null;
   card_char2?: number | null;
   card_char3?: number | null;
-  [k: `card${number}`]: number | null | undefined; // card1..card20
-};
-
-// โหลดตัวละคร 3 ใบแรก และเด็ค 20 ใบ (supports/events)
+} & { [K in `card${number}`]?: number | null };
+// Load 3 ตัวละคร + เด็ค 20 ใบ
 async function loadDeckFromDB(userId: number): Promise<{ chars: string[]; deck: string[] } | null> {
   const row = await qOne<DeckRow>("SELECT * FROM decks WHERE user_id = ? LIMIT 1", [userId]);
   if (!row) return null;
@@ -315,12 +330,10 @@ async function loadDeckFromDB(userId: number): Promise<{ chars: string[]; deck: 
     const code = supById.get(id) ?? evtById.get(id) ?? null;
     if (code) deck.push(code);
   }
-
   return { chars, deck: shuffle(deck) };
 }
 
-/* ========================= Start game ========================= */
-
+/* ========================= Game ops ========================= */
 async function startGame(room: RoomState) {
   room.mode = "play";
   room.phaseNo = 1;
@@ -378,15 +391,10 @@ async function startGame(room: RoomState) {
   room.coinAck = { p1: false, p2: false };
   room.turn = win;
   room.phaseActor = win;
-
-  bumpVersion(room.id);
 }
-
-/* ========================= State to client ========================= */
 
 function stateForClient(room: RoomState, currentUserId?: string) {
   const you: Side | null = currentUserId ? sideOf(room, currentUserId) : null;
-
   return {
     mode: room.mode,
     players: {
@@ -409,26 +417,19 @@ function stateForClient(room: RoomState, currentUserId?: string) {
     hand: room.hand,
     ready: room.ready,
     you: you ?? undefined,
+    warnNoDeck: room.warnNoDeck,
   };
 }
 
-/* ========================= Deck presence (warn only) ========================= */
-
-async function userHasDeck(
-  room: RoomState,
-  side: Side,
-): Promise<{ has: boolean; display?: string | null }> {
+async function userHasDeck(room: RoomState, side: Side): Promise<{ has: boolean; display?: string | null }> {
   if (!DB_ON || !pool) return { has: true, display: room.players[side]?.name ?? null };
   const p = room.players[side];
   if (!p) return { has: false, display: null };
-
   const u = await findUserRowByAny(p.userId, p.name ?? null);
   if (!u) return { has: false, display: p.name ?? null };
-
   const d = await qOne<{ id: number }>("SELECT id FROM decks WHERE user_id = ? LIMIT 1", [u.id]);
   return { has: !!d, display: p.name ?? null };
 }
-
 async function checkMissingDecks(room: RoomState): Promise<string[]> {
   const missing: string[] = [];
   for (const s of ["p1", "p2"] as const) {
@@ -438,62 +439,49 @@ async function checkMissingDecks(room: RoomState): Promise<string[]> {
   return missing;
 }
 
-/* ========================= Turn helpers ========================= */
-
-function passTurnAfterCombat(room: RoomState, actor: Side) {
-  const foe: Side = actor === "p1" ? "p2" : "p1";
-  room.turn = foe;
-  room.phaseActor = foe;
-}
-
-/* ========================= Ops ========================= */
-
-function createRoom(roomId: string, user: PlayerInfo) {
-  const id = roomId.toUpperCase();
-  const room = ensureRoom(id);
+function createRoom(room: RoomState, user: PlayerInfo) {
   if (!room.players.p1 && !room.players.p2) {
-    room.players.p1 = user; // host เป็น p1 เสมอ
-    bumpVersion(id);
+    room.players.p1 = user; // host = p1
   }
-  return { ok: true, roomId: id, version: getVersion(id) };
 }
-
-function joinRoom(roomId: string, user: PlayerInfo) {
-  const id = roomId.toUpperCase();
-  const room = ensureRoom(id);
+function joinRoomOp(room: RoomState, user: PlayerInfo) {
   const s = sideOf(room, user.userId);
   if (s) {
     room.players[s] = user;
-    bumpVersion(id);
-    return { ok: true, roomId: id, version: getVersion(id) };
+    return;
   }
-  if (!room.players.p1) { room.players.p1 = user; bumpVersion(id); return { ok: true, roomId: id, version: getVersion(id) }; }
-  if (!room.players.p2) { room.players.p2 = user; bumpVersion(id); return { ok: true, roomId: id, version: getVersion(id) }; }
+  if (!room.players.p1) {
+    room.players.p1 = user;
+    return;
+  }
+  if (!room.players.p2) {
+    room.players.p2 = user;
+    return;
+  }
   throw new Error("Room is full");
 }
-
 function markReady(room: RoomState, userId: string) {
   const s = sideOf(room, userId);
   if (!s) throw new Error("Not in room");
-  if (!room.ready[s]) { room.ready[s] = true; bumpVersion(room.id); }
+  room.ready[s] = true;
 }
-
 function ackCoin(room: RoomState, userId: string) {
   const s = sideOf(room, userId);
   if (!s) return;
   if (!room.coin.decided) return;
-  if (!room.coinAck[s]) { room.coinAck[s] = true; bumpVersion(room.id); }
+  room.coinAck[s] = true;
+  // ทั้งสองฝั่งกดยอมรับแล้ว → ปิด overlay (decided=false) แต่เก็บ winner/turn เดิมไว้
+  if (room.coinAck.p1 && room.coinAck.p2) {
+    room.coin.decided = false;
+  }
 }
-
 function endTurn(room: RoomState, userId: string) {
   const s = sideOf(room, userId);
   if (!s) throw new Error("Not in room");
   if (room.turn !== s) return;
   room.turn = s === "p1" ? "p2" : "p1";
   room.phaseActor = room.turn;
-  bumpVersion(room.id);
 }
-
 function endPhase(room: RoomState, userId: string) {
   const s = sideOf(room, userId);
   if (!s) throw new Error("Not in room");
@@ -506,11 +494,9 @@ function endPhase(room: RoomState, userId: string) {
   if (!(room.endTurned.p1 && room.endTurned.p2)) {
     room.turn = s === "p1" ? "p2" : "p1";
     room.phaseActor = room.turn;
-    bumpVersion(room.id);
     return;
   }
 
-  // เปิดเฟสใหม่ (คนที่กด End Phase ก่อนจะได้เริ่มก่อน)
   const starter = room.phaseEndOrder[0] ?? "p1";
   room.phaseNo += 1;
   room.turn = starter;
@@ -518,12 +504,9 @@ function endPhase(room: RoomState, userId: string) {
   room.endTurned = { p1: false, p2: false };
   room.phaseEndOrder = [];
 
-  // จบเฟสแล้วจั่ว +2
   draw(room, "p1", 2);
   draw(room, "p2", 2);
-  bumpVersion(room.id);
 }
-
 function playCard(room: RoomState, userId: string, handIndex: number) {
   const s = sideOf(room, userId);
   if (!s) throw new Error("Not in room");
@@ -531,10 +514,8 @@ function playCard(room: RoomState, userId: string, handIndex: number) {
   const card = room.hand[s][handIndex];
   if (!card) return;
 
-  // ถ้ามี character หลุดมา → ทิ้งเฉย ๆ
   if (allChars().some((c) => c.code === card)) {
     room.hand[s].splice(handIndex, 1);
-    bumpVersion(room.id);
     return;
   }
 
@@ -542,11 +523,19 @@ function playCard(room: RoomState, userId: string, handIndex: number) {
     room.hero[s] = Math.min(room.hero[s] + 2, 30);
   } else if (card === "BLAZING_SIGIL") {
     room.board[s].forEach((u) => (u.hp += 2));
+  } else if (card === "FIREWORKS") {
+    const foe: Side = s === "p1" ? "p2" : "p1";
+    if (room.board[foe].length === 0) {
+      room.hero[foe] = Math.max(0, room.hero[foe] - 2);
+    } else {
+      for (let i = room.board[foe].length - 1; i >= 0; i--) {
+        room.board[foe][i].hp -= 2;
+        if (room.board[foe][i].hp <= 0) room.board[foe].splice(i, 1);
+      }
+    }
   }
   room.hand[s].splice(handIndex, 1);
-  bumpVersion(room.id);
 }
-
 function discardForInfinite(room: RoomState, userId: string, handIndex: number) {
   const s = sideOf(room, userId);
   if (!s) throw new Error("Not in room");
@@ -555,9 +544,12 @@ function discardForInfinite(room: RoomState, userId: string, handIndex: number) 
   if (!card) return;
   room.hand[s].splice(handIndex, 1);
   addDie(room.dice[s], "Infinite", 1);
-  bumpVersion(room.id);
 }
-
+function passTurnAfterCombat(room: RoomState, actor: Side) {
+  const foe: Side = actor === "p1" ? "p2" : "p1";
+  room.turn = foe;
+  room.phaseActor = foe;
+}
 function combat(
   room: RoomState,
   userId: string,
@@ -607,28 +599,22 @@ function combat(
     if (tgt.hp <= 0) room.board[foe].splice(t, 1);
   }
 
-  // จบเทิร์นเฉพาะการต่อสู้
   passTurnAfterCombat(room, s);
-  bumpVersion(room.id);
 }
 
 /* ========================= HTTP ========================= */
-
-type GetStateBody = {
-  action?: string;
-  roomId?: string;
-  userId?: string;
-  user?: PlayerInfo;
-  index?: number;
-  attacker?: number;
-  target?: number | null;
-  mode?: "basic" | "skill" | "ult";
-  sinceVersion?: number;
-};
-
 export async function POST(req: Request) {
   try {
-    const body = (await req.json().catch(() => ({}))) as GetStateBody;
+    const body = (await req.json().catch(() => ({}))) as {
+      action?: string;
+      roomId?: string;
+      userId?: string;
+      user?: PlayerInfo;
+      index?: number;
+      attacker?: number;
+      target?: number | null;
+      mode?: "basic" | "skill" | "ult";
+    };
 
     const action = String(body?.action || "");
     const roomId = String(body?.roomId || "").toUpperCase();
@@ -642,77 +628,78 @@ export async function POST(req: Request) {
     }
 
     if (action === "createRoom") {
-      const res = createRoom(String(body.roomId || "").toUpperCase(), (body.user ?? {}) as PlayerInfo);
-      return NextResponse.json(res);
-    }
-    if (action === "joinRoom") {
-      const res = joinRoom(String(body.roomId || "").toUpperCase(), (body.user ?? {}) as PlayerInfo);
-      return NextResponse.json(res);
+      const id = String(body.roomId || "").toUpperCase();
+      const { state, version } = await loadRoom(id);
+      createRoom(state, (body.user ?? {}) as PlayerInfo);
+      await saveRoom(id, state, version);
+      return NextResponse.json({ ok: true, roomId: id });
     }
 
-    const room = ensureRoom(roomId);
+    if (action === "joinRoom") {
+      const id = String(body.roomId || "").toUpperCase();
+      const { state, version } = await loadRoom(id);
+      joinRoomOp(state, (body.user ?? {}) as PlayerInfo);
+      await saveRoom(id, state, version);
+      return NextResponse.json({ ok: true, roomId: id });
+    }
+
+    // actions that require room loaded
+    const { state: room, version: ver } = await loadRoom(roomId);
 
     switch (action) {
       case "getState": {
-        const clientVer = Number(body.sinceVersion ?? 0);
-        const currentVer = getVersion(roomId);
-        if (clientVer >= currentVer) {
-          return new NextResponse(null, { status: 204 });
-        }
         const uid = String(body.userId || "");
-        return NextResponse.json({ ok: true, version: currentVer, state: stateForClient(room, uid) });
+        return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
       }
 
       case "ready": {
         const uid = String((body.user as PlayerInfo)?.userId || body.userId || "");
         if (!uid) throw new Error("Missing userId");
         markReady(room, uid);
-
         const missing = await checkMissingDecks(room);
         room.warnNoDeck = missing.length ? missing : undefined;
-
         if (room.ready.p1 && room.ready.p2 && room.mode !== "play") {
           await startGame(room);
         }
-        const v = getVersion(roomId);
-        return NextResponse.json({ ok: true, version: v, state: stateForClient(room, uid) });
+        await saveRoom(roomId, room, ver);
+        return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
       }
 
       case "ackCoin": {
         const uid = String((body.user as PlayerInfo)?.userId || body.userId || "");
-        if (uid) ackCoin(room, uid);
-        const v = getVersion(roomId);
-        return NextResponse.json({ ok: true, version: v, state: stateForClient(room, uid) });
+        ackCoin(room, uid);
+        await saveRoom(roomId, room, ver);
+        return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
       }
 
       case "endTurn": {
         const uid = String((body.user as PlayerInfo)?.userId || body.userId || "");
         endTurn(room, uid);
-        const v = getVersion(roomId);
-        return NextResponse.json({ ok: true, version: v, state: stateForClient(room, uid) });
+        await saveRoom(roomId, room, ver);
+        return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
       }
 
       case "endPhase": {
         const uid = String((body.user as PlayerInfo)?.userId || body.userId || "");
         endPhase(room, uid);
-        const v = getVersion(roomId);
-        return NextResponse.json({ ok: true, version: v, state: stateForClient(room, uid) });
+        await saveRoom(roomId, room, ver);
+        return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
       }
 
       case "playCard": {
         const uid = String((body.user as PlayerInfo)?.userId || body.userId || "");
         const handIndex = Number(body.index ?? 0);
         playCard(room, uid, handIndex);
-        const v = getVersion(roomId);
-        return NextResponse.json({ ok: true, version: v, state: stateForClient(room, uid) });
+        await saveRoom(roomId, room, ver);
+        return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
       }
 
       case "discardForInfinite": {
         const uid = String((body.user as PlayerInfo)?.userId || body.userId || "");
         const handIndex = Number(body.index ?? 0);
         discardForInfinite(room, uid, handIndex);
-        const v = getVersion(roomId);
-        return NextResponse.json({ ok: true, version: v, state: stateForClient(room, uid) });
+        await saveRoom(roomId, room, ver);
+        return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
       }
 
       case "combat": {
@@ -721,8 +708,8 @@ export async function POST(req: Request) {
         const target = body.target == null ? null : Number(body.target);
         const mode = String(body.mode ?? "basic") as "basic" | "skill" | "ult";
         combat(room, uid, attacker, target, mode);
-        const v = getVersion(roomId);
-        return NextResponse.json({ ok: true, version: v, state: stateForClient(room, uid) });
+        await saveRoom(roomId, room, ver);
+        return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
       }
 
       default:
