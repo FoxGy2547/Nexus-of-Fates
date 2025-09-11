@@ -1,195 +1,227 @@
 // src/app/deck-builder/page.tsx
 "use client";
 
-import { Suspense, useEffect, useMemo, useState } from "react";
+import React, { Suspense, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 import { useSearchParams } from "next/navigation";
 import cardsDataJson from "@/data/cards.json";
 
-/* ========= types from cards.json ========= */
-type CharacterCard = { char_id: number; code: string; name: string; element: string; attack: number; hp: number; cost: number; abilityCode: string; art: string; };
-type SupportCard   = { id: number;     code: string; name: string; element: string; cost: number; text: string;          art: string; };
-type EventCard     = { id: number;     code: string; name: string; element: string; cost: number; text: string;          art: string; };
-type CardsData = { characters: CharacterCard[]; supports: SupportCard[]; events: EventCard[] };
-const cardsData = cardsDataJson as CardsData;
+/* ================= types ================= */
+type CharacterCard = {
+  char_id: number; code: string; name: string; element: string;
+  attack: number; hp: number; cost: number; abilityCode: string; art: string;
+};
+type SupportCard = { id: number; code: string; name: string; element: string; cost: number; text: string; art: string };
+type EventCard   = { id: number; code: string; name: string; element: string; cost: number; text: string; art: string };
+type CardsData   = { characters: CharacterCard[]; supports: SupportCard[]; events: EventCard[] };
+const cardsData  = cardsDataJson as CardsData;
 
-/* ========= API types ========= */
-type InvItem = { cardId: number; code: string; kind: "character" | "support" | "event"; qty: number };
-type InvRes  = { items: InvItem[] };
-type DeckRes = { ok: true; deckId: number | null; name: string; characters: number[]; cards: { cardId: number; count: number }[] };
+type Inventory = { userId: number; chars: Record<number, number>; others: Record<number, number> };
 
-const OTHER_ID_BASE = 100; // 101..103
-const FRAME_W = 256;
-const FRAME_H = 384;
+type SaveBody = { userId: number; name: string; characters: number[]; cards: { cardId: number; count: number }[] };
 
-/* ========= Suspense wrapper ========= */
-export default function Page() {
+type DeckResp =
+  | { ok: true; deck: { name: string; characters: number[]; cards: { cardId: number; count: number }[] } }
+  | { ok: true; deck?: undefined };
+
+type MeResp = { ok: boolean; user?: { id: number } };
+
+/* ================ constants ================ */
+const CARD_W = 220;
+const CARD_RATIO = "aspect-[2/3]";
+
+/* ================ helpers ================ */
+function cardImg(art: string, kind: "character" | "support" | "event"): string {
+  return encodeURI(kind === "character" ? `/char_cards/${art}` : `/cards/${art}`);
+}
+async function getJSON<T>(url: string): Promise<T> {
+  const r = await fetch(url, { cache: "no-store" });
+  if (!r.ok) throw new Error(await r.text().catch(() => r.statusText));
+  return (await r.json()) as T;
+}
+async function postJSON<T>(url: string, body: unknown): Promise<T> {
+  const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, cache: "no-store", body: JSON.stringify(body) });
+  const txt = await r.text().catch(() => "");
+  if (!r.ok) throw new Error(txt || r.statusText);
+  return (txt ? JSON.parse(txt) : ({} as T)) as T;
+}
+
+/** แปลง payload inventory ให้เป็นทรงมาตรฐาน {chars, others} */
+function normalizeInventory(raw: unknown): Inventory {
+  const empty: Inventory = { userId: 0, chars: {}, others: {} };
+  if (!raw || typeof raw !== "object") return empty;
+
+  const top = raw as Record<string, unknown>;
+  const row: Record<string, unknown> =
+    (typeof top.row === "object" && top.row ? (top.row as Record<string, unknown>) : top);
+
+  const inv: Inventory = {
+    userId: Number(row.user_id ?? 0) || Number((top.userId as number) ?? 0) || 0,
+    chars: {},
+    others: {},
+  };
+
+  if (typeof row.chars === "object" && row.chars && !Array.isArray(row.chars)) {
+    const c = row.chars as Record<string, unknown>;
+    for (const [k, v] of Object.entries(c)) inv.chars[Number(k)] = Number(v ?? 0);
+  }
+  if (typeof row.others === "object" && row.others && !Array.isArray(row.others)) {
+    const o = row.others as Record<string, unknown>;
+    for (const [k, v] of Object.entries(o)) inv.others[Number(k)] = Number(v ?? 0);
+  }
+
+  // รองรับคอลัมน์แบบ char_1 … card_1 …
+  for (const [k, v] of Object.entries(row)) {
+    if (typeof v === "number" || typeof v === "string") {
+      const mChar = /^char_(\d+)$/.exec(k);
+      if (mChar) { inv.chars[Number(mChar[1])] = Number(v); continue; }
+      const mCard = /^card_(\d+)$/.exec(k);
+      if (mCard) { inv.others[Number(mCard[1])] = Number(v); continue; }
+    }
+  }
+  return inv;
+}
+
+/* ================ data from cards.json ================ */
+const CHAR_CARDS = cardsData.characters.map(c => ({ id: c.char_id, code: c.code, name: c.name, art: c.art }));
+const OTHER_CARDS = [
+  ...cardsData.supports.map(s => ({ id: s.id, code: s.code, name: s.name, art: s.art, kind: "support" as const })),
+  ...cardsData.events.map(e => ({ id: e.id, code: e.code, name: e.name, art: e.art, kind: "event"  as const })),
+];
+
+/* ================ UI bits ================ */
+function Badge({ children }: { children: React.ReactNode }) {
+  return <span className="px-1.5 py-0.5 rounded text-[11px] bg-black/70 text-white pointer-events-none">{children}</span>;
+}
+function PortraitCardImage({ src, alt }: { src: string; alt: string }) {
   return (
-    <Suspense fallback={<main className="p-6 text-sm opacity-70">Loading deck…</main>}>
-      <DeckBuilderScreen />
-    </Suspense>
+    <div className={`relative w-full ${CARD_RATIO} rounded-lg overflow-hidden bg-neutral-900/60`}>
+      <Image src={src} alt={alt} fill className="object-contain" unoptimized />
+    </div>
   );
 }
 
-/* ========= helpers ========= */
-function codeToPrettyName(code: string) {
-  return code
-    .split("_")
-    .map((s) => s.charAt(0).toUpperCase() + s.slice(1).toLowerCase())
-    .join(" ");
-}
-function cardImagePath(code: string, kind: "character" | "support" | "event"): string {
-  const meta =
-    kind === "character"
-      ? cardsData.characters.find((c) => c.code === code)
-      : kind === "support"
-      ? cardsData.supports.find((c) => c.code === code)
-      : cardsData.events.find((c) => c.code === code);
-  const file = meta?.art ?? `${code}.png`;
-  return kind === "character" ? `/char_cards/${file}` : `/cards/${file}`;
-}
-
-/* ========= Real screen ========= */
-function DeckBuilderScreen() {
+/* ================= Page ================= */
+function PageInner() {
   const sp = useSearchParams();
-  const userId = Number(sp.get("userId") ?? "0") || 6; // เปลี่ยนเลข default ได้ตามต้องการ
-  const [name, setName] = useState("My Deck");
+  const qsUserId = Number(sp.get("userId") ?? 0) || 0;
 
-  // inventory (owned)
-  const [inv, setInv] = useState<InvItem[] | null>(null);
-  // current selection
-  const [chars, setChars] = useState<number[]>([]);
-  const [others, setOthers] = useState<Record<number, number>>({ 101: 0, 102: 0, 103: 0 });
+  const [userId, setUserId] = useState<number>(qsUserId);
+  const [name, setName] = useState<string>("My Deck");
+  const [inv, setInv] = useState<Inventory | null>(null);
+  const [selChars, setSelChars] = useState<number[]>([]);
+  const [selOthers, setSelOthers] = useState<Record<number, number>>({});
+  const othersTotal = useMemo(() => Object.values(selOthers).reduce((a, b) => a + b, 0), [selOthers]);
 
-  // preload := inventory + deck
+  // 0) if ไม่มี ?userId= ให้ลอง /api/me
   useEffect(() => {
+    if (qsUserId) return;
     (async () => {
-      const [invR, deckR] = await Promise.all([
-        fetch(`/api/inventory?userId=${userId}`, { cache: "no-store" }).then((r) => r.json() as Promise<InvRes>),
-        fetch(`/api/deck?userId=${userId}`, { cache: "no-store" }).then((r) => r.json() as Promise<DeckRes>),
-      ]);
+      try {
+        const me = await getJSON<MeResp>("/api/me");
+        const uid = Number(me.user?.id ?? 0);
+        if (uid) setUserId(uid);
+      } catch { /* ignore */ }
+    })();
+  }, [qsUserId]);
 
-      setInv(invR.items ?? []);
+  useEffect(() => {
+    if (qsUserId && qsUserId !== userId) setUserId(qsUserId);
+  }, [qsUserId, userId]);
 
-      if (deckR?.ok) {
-        setName(deckR.name || "My Deck");
-        setChars(deckR.characters || []);
-        const m: Record<number, number> = { 101: 0, 102: 0, 103: 0 };
-        for (const it of deckR.cards || []) m[it.cardId] = it.count;
-        setOthers(m);
+  // 1) โหลด inventory + deck พร้อมกัน → แล้วพรีฟิล
+  useEffect(() => {
+    if (!userId) return;
+    (async () => {
+      try {
+        const [invRaw, deckResp] = await Promise.all([
+          getJSON<unknown>(`/api/inventory?userId=${userId}`),
+          getJSON<DeckResp>(`/api/deck?userId=${userId}`),
+        ]);
+        const norm = normalizeInventory(invRaw);
+        setInv(norm);
+
+        if (deckResp.deck) {
+          setName(deckResp.deck.name || "My Deck");
+          setSelChars(deckResp.deck.characters ?? []);
+          const rec: Record<number, number> = {};
+          for (const it of deckResp.deck.cards ?? []) rec[it.cardId] = it.count;
+          setSelOthers(rec);
+        } else {
+          setSelChars([]);
+          setSelOthers({});
+        }
+      } catch (e) {
+        console.error("load deck/inventory failed:", e);
       }
-    })().catch(() => {});
+    })();
   }, [userId]);
 
-  // สร้าง list จาก cards.json
-  const charList = useMemo(
-    () => cardsData.characters.map((c) => ({ id: c.char_id, code: c.code, art: cardImagePath(c.code, "character") })),
-    [],
-  );
-  const [sup1] = cardsData.supports.slice(0, 1);
-  const [sup2] = cardsData.supports.slice(1, 2);
-  const [evt1] = cardsData.events.slice(0, 1);
-  const sup1Meta = { slotId: 101 as const, code: sup1.code, art: cardImagePath(sup1.code, "support") };
-  const sup2Meta = { slotId: 102 as const, code: sup2.code, art: cardImagePath(sup2.code, "support") };
-  const evtMeta  = { slotId: 103 as const, code: evt1.code, art: cardImagePath(evt1.code, "event") };
-
-  // owned helper
-  const ownedMap = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const it of inv ?? []) m.set(it.code, it.qty);
-    return m;
-  }, [inv]);
-
-  // select/clear
-  const toggleChar = (id: number, owned: number) => {
-    setChars((prev) => {
-      const has = prev.includes(id);
-      if (has) return prev.filter((x) => x !== id);
-      // อนุญาตคลิกเฉพาะกรณีมีของ หรือ ช่องยังว่าง (<=3) และไม่ได้บังคับให้จางทั้งหน้า
-      if (prev.length >= 3) return prev;
-      if (owned < 1) return prev; // ไม่มีของจริง ๆ ก็ไม่ให้เพิ่มใหม่ แต่ถ้าเดิมในเด็คจะโชว์อยู่แล้ว
-      return [...prev, id];
-    });
-  };
-  const totalOthers = (m: Record<number, number>) => (m[101] ?? 0) + (m[102] ?? 0) + (m[103] ?? 0);
-  const inc = (slotId: 101 | 102 | 103, owned: number) =>
-    setOthers((p) => {
-      const next = { ...p };
-      if ((next[slotId] ?? 0) < owned && totalOthers(next) < 20) next[slotId] = (next[slotId] ?? 0) + 1;
+  function toggleChar(id: number) {
+    setSelChars((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : prev.length >= 3 ? prev : [...prev, id]));
+  }
+  function addOther(id: number) {
+    setSelOthers((prev) => ({ ...prev, [id]: Math.min(20, (prev[id] ?? 0) + 1) }));
+  }
+  function decOther(id: number) {
+    setSelOthers((prev) => {
+      const n = Math.max(0, (prev[id] ?? 0) - 1);
+      const next = { ...prev };
+      if (n === 0) delete next[id];
+      else next[id] = n;
       return next;
     });
-  const dec = (slotId: 101 | 102 | 103) =>
-    setOthers((p) => {
-      const next = { ...p };
-      if ((next[slotId] ?? 0) > 0) next[slotId] = (next[slotId] ?? 0) - 1;
-      return next;
-    });
-
-  // save
-  const onSave = async () => {
-    const body = {
+  }
+  async function onSave() {
+    if (!userId) return alert("ไม่พบ userId (แนบ ?userId= ใน URL หรือ login เพื่อให้ระบบหาให้อัตโนมัติ)");
+    if (selChars.length === 0) return alert("เลือกตัวละครอย่างน้อย 1 ตัวก่อนนะ");
+    const body: SaveBody = {
       userId,
       name,
-      characters: chars,
-      cards: [
-        { cardId: 101, count: others[101] ?? 0 },
-        { cardId: 102, count: others[102] ?? 0 },
-        { cardId: 103, count: others[103] ?? 0 },
-      ],
+      characters: selChars,
+      cards: Object.entries(selOthers).map(([id, count]) => ({ cardId: Number(id), count: Number(count) })),
     };
-    const res = await fetch("/api/deck", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const j = await res.json();
-    if (!res.ok) {
-      alert(j?.error || "Save failed");
-      return;
+    try {
+      await postJSON("/api/deck", body);
+      alert("บันทึกเด็คเรียบร้อยแล้ว!");
+    } catch (e) {
+      alert(`Save ล้มเหลว: ${e instanceof Error ? e.message : String(e)}`);
     }
-    alert("Saved!");
-  };
+  }
 
   return (
-    <main className="min-h-screen p-6 flex flex-col gap-4">
-      <header className="flex items-center gap-2">
-        <input
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          className="px-3 py-2 rounded bg-neutral-900 border border-white/10"
-          placeholder="Deck name"
-        />
-        <div className="ml-auto text-sm opacity-70">
-          Chars {chars.length}/3 • Others {totalOthers(others)}/20 • User #{userId}
-        </div>
-        <button className="ml-3 px-4 py-2 rounded bg-emerald-600" onClick={onSave}>
-          Save
-        </button>
+    <main className="min-h-screen p-6 flex flex-col gap-6">
+      <header className="flex items-center gap-3">
+        <input className="px-3 py-2 rounded bg-neutral-800 flex-1" value={name} onChange={(e)=>setName(e.target.value)} placeholder="Deck name" />
+        <div className="text-sm opacity-70">Chars {selChars.length}/3</div>
+        <div className="text-sm opacity-70">Others {othersTotal}/20</div>
+        <button className="px-4 py-2 rounded bg-emerald-600" onClick={onSave}>Save</button>
       </header>
 
       {/* Characters */}
       <section>
-        <h2 className="font-semibold mb-2">Characters</h2>
-        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
-          {charList.map((c) => {
-            const selected = chars.includes(c.id);          // จากเด็คเดิมหรือเลือกใหม่
-            const owned = ownedMap.get(c.code) ?? 0;        // จำนวนที่มี
-            const cannotAdd = !selected && (owned < 1 || chars.length >= 3);
-
+        <div className="font-semibold mb-2">Characters</div>
+        <div className="flex flex-wrap gap-3">
+          {CHAR_CARDS.map((c) => {
+            const owned = inv?.chars?.[c.id] ?? 0;              // owned จาก inventory
+            const selected = selChars.includes(c.id);           // พรีฟิลจาก deck
             return (
               <button
                 key={c.id}
-                onClick={() => !cannotAdd && toggleChar(c.id, owned)}
-                className={`relative rounded-lg border bg-black/30 overflow-hidden
-                  ${selected ? "border-emerald-500" : "border-white/10"}
-                  ${cannotAdd ? "cursor-not-allowed" : "hover:border-white/30"}`}
-                style={{ width: FRAME_W, height: FRAME_H }}
-                title={codeToPrettyName(c.code)}
+                className={`relative border p-3 text-left rounded-xl ${selected ? "border-emerald-500" : "border-white/10"} bg-black/20 hover:bg-black/30`}
+                style={{ width: CARD_W }}
+                onClick={() => toggleChar(c.id)}
+                title="กดเพื่อเลือก/เอาออก"
               >
-                <Image src={c.art} alt={c.code} fill sizes="100%" className="object-contain" unoptimized />
-                <div className="absolute left-2 top-2 text-[11px] bg-black/70 rounded px-1">#{c.id}</div>
-                <div className="absolute right-2 top-2 text-[11px] bg-black/70 rounded px-1">owned {owned}</div>
-                <div className="absolute left-2 bottom-2 text-sm">{codeToPrettyName(c.code)}</div>
+                <div className="absolute left-2 top-2 z-10"><Badge>#{c.id}</Badge></div>
+                {/* แสดงเฉพาะเมื่อมีการ์ด */}
+                {owned > 0 && (
+                  <div className="absolute right-2 top-2 z-10"><Badge>owned {owned}</Badge></div>
+                )}
+                <div className="mt-3">
+                  <PortraitCardImage src={cardImg(c.art, "character")} alt={c.code} />
+                </div>
+                <div className="mt-2 font-medium truncate">{c.name || c.code.replaceAll("_", " ")}</div>
               </button>
             );
           })}
@@ -198,29 +230,55 @@ function DeckBuilderScreen() {
 
       {/* Supports & Events */}
       <section>
-        <h2 className="font-semibold mb-2">Supports & Events</h2>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {[sup1Meta, sup2Meta, evtMeta].map((it) => {
-            const owned = ownedMap.get(it.code) ?? 0;
-            const cnt = others[it.slotId] ?? 0;
+        <div className="font-semibold mb-2">Supports & Events</div>
+        <div className="flex flex-wrap gap-3">
+          {OTHER_CARDS.map((o) => {
+            const owned = inv?.others?.[o.id] ?? 0;           // owned จาก inventory
+            const picked = selOthers[o.id] ?? 0;              // พรีฟิลจาก deck
             return (
-              <div key={it.slotId} className="rounded-lg border border-white/10 bg-black/30 p-2">
-                <div className="relative" style={{ width: FRAME_W, height: FRAME_H }}>
-                  <Image src={it.art} alt={it.code} fill sizes="100%" className="object-contain" unoptimized />
-                  <div className="absolute left-2 top-2 text-[11px] bg-black/70 rounded px-1">#{it.slotId - OTHER_ID_BASE}</div>
-                  <div className="absolute right-2 top-2 text-[11px] bg-black/70 rounded px-1">owned {owned}</div>
-                  <div className="absolute left-2 bottom-2 text-sm">{codeToPrettyName(it.code)}</div>
-                </div>
-                <div className="mt-2 flex items-center gap-2">
-                  <button className="px-2 py-1 rounded bg-neutral-800" onClick={() => dec(it.slotId)}>-</button>
-                  <div className="min-w-6 text-center tabular-nums">{cnt}</div>
-                  <button className="px-2 py-1 rounded bg-neutral-700" onClick={() => inc(it.slotId, owned)}>+</button>
-                </div>
+              <div
+                key={`${o.kind}-${o.id}`}
+                className="relative border border-white/10 p-3 rounded-xl bg-black/20 hover:bg-black/30"
+                style={{ width: CARD_W }}
+              >
+                <div className="absolute left-2 top-2 z-20"><Badge>#{o.id}</Badge></div>
+                {/* แสดง owned เฉพาะเมื่อมีการ์ด */}
+                {owned > 0 && (
+                  <div className="absolute left-12 top-2 z-20"><Badge>owned {owned}</Badge></div>
+                )}
+
+                {picked > 0 && (
+                  <button
+                    className="absolute right-2 top-2 z-30 rounded bg-rose-600 px-1.5 py-0.5 text-[11px]"
+                    onClick={() => decOther(o.id)}
+                    title="ลบ 1 ใบ"
+                  >
+                    −
+                  </button>
+                )}
+
+                <button className="block w-full text-left relative z-0" onClick={() => addOther(o.id)} title="กดการ์ดเพื่อเพิ่ม 1 ใบ">
+                  <PortraitCardImage src={cardImg(o.art, o.kind)} alt={o.code} />
+                  <div className="mt-2 font-medium truncate">{o.name || o.code.replaceAll("_", " ")}</div>
+                </button>
+
+                {/* แสดงจำนวนที่เลือกเฉพาะเมื่อ > 0 */}
+                {picked > 0 && (
+                  <div className="absolute right-2 bottom-2 z-20"><Badge>{picked}</Badge></div>
+                )}
               </div>
             );
           })}
         </div>
       </section>
     </main>
+  );
+}
+
+export default function DeckBuilderPage() {
+  return (
+    <Suspense fallback={<main className="min-h-screen p-6">Loading…</main>}>
+      <PageInner />
+    </Suspense>
   );
 }
