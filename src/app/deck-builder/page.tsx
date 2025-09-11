@@ -6,7 +6,7 @@ import Image from "next/image";
 import { useSearchParams } from "next/navigation";
 import cardsDataJson from "@/data/cards.json";
 
-/* ============ types ============ */
+/* ================= types ================= */
 type CharacterCard = {
   char_id: number; code: string; name: string; element: string;
   attack: number; hp: number; cost: number; abilityCode: string; art: string;
@@ -20,17 +20,17 @@ type Inventory = { userId: number; chars: Record<number, number>; others: Record
 
 type SaveBody = { userId: number; name: string; characters: number[]; cards: { cardId: number; count: number }[] };
 
-type GetDeckResp =
+type DeckResp =
   | { ok: true; deck: { name: string; characters: number[]; cards: { cardId: number; count: number }[] } }
   | { ok: true; deck?: undefined };
 
 type MeResp = { ok: boolean; user?: { id: number } };
 
-/* ============ consts ============ */
+/* ================ constants ================ */
 const CARD_W = 220;
 const CARD_RATIO = "aspect-[2/3]";
 
-/* ============ helpers ============ */
+/* ================ helpers ================ */
 function cardImg(art: string, kind: "character" | "support" | "event"): string {
   return encodeURI(kind === "character" ? `/char_cards/${art}` : `/cards/${art}`);
 }
@@ -46,14 +46,52 @@ async function postJSON<T>(url: string, body: unknown): Promise<T> {
   return (txt ? JSON.parse(txt) : ({} as T)) as T;
 }
 
-/* ============ data from cards.json ============ */
+/** แปลง payload inventory ให้เป็นทรงมาตรฐาน {chars, others} */
+function normalizeInventory(raw: unknown): Inventory {
+  const empty: Inventory = { userId: 0, chars: {}, others: {} };
+  if (!raw || typeof raw !== "object") return empty;
+
+  // กรณีส่งมารายการเดียว (row เดียว)
+  const top = raw as Record<string, unknown>;
+  const row: Record<string, unknown> =
+    (typeof top.row === "object" && top.row ? (top.row as Record<string, unknown>) : top);
+
+  const inv: Inventory = {
+    userId: Number(row.user_id ?? 0) || Number((top.userId as number) ?? 0) || 0,
+    chars: {},
+    others: {},
+  };
+
+  // ถ้ามีทรงมาตรฐานแล้ว ก็ใช้เลย
+  if (typeof row.chars === "object" && row.chars && !Array.isArray(row.chars)) {
+    const c = row.chars as Record<string, unknown>;
+    for (const [k, v] of Object.entries(c)) inv.chars[Number(k)] = Number(v ?? 0);
+  }
+  if (typeof row.others === "object" && row.others && !Array.isArray(row.others)) {
+    const o = row.others as Record<string, unknown>;
+    for (const [k, v] of Object.entries(o)) inv.others[Number(k)] = Number(v ?? 0);
+  }
+
+  // รองรับคอลัมน์แบบ char_1 … card_1 …
+  for (const [k, v] of Object.entries(row)) {
+    if (typeof v === "number" || typeof v === "string") {
+      const mChar = /^char_(\d+)$/.exec(k);
+      if (mChar) { inv.chars[Number(mChar[1])] = Number(v); continue; }
+      const mCard = /^card_(\d+)$/.exec(k);
+      if (mCard) { inv.others[Number(mCard[1])] = Number(v); continue; }
+    }
+  }
+  return inv;
+}
+
+/* ================ data from cards.json ================ */
 const CHAR_CARDS = cardsData.characters.map(c => ({ id: c.char_id, code: c.code, name: c.name, art: c.art }));
 const OTHER_CARDS = [
   ...cardsData.supports.map(s => ({ id: s.id, code: s.code, name: s.name, art: s.art, kind: "support" as const })),
   ...cardsData.events.map(e => ({ id: e.id, code: e.code, name: e.name, art: e.art, kind: "event"  as const })),
 ];
 
-/* ============ UI bits ============ */
+/* ================ UI bits ================ */
 function Badge({ children }: { children: React.ReactNode }) {
   return <span className="px-1.5 py-0.5 rounded text-[11px] bg-black/70 text-white pointer-events-none">{children}</span>;
 }
@@ -65,59 +103,65 @@ function PortraitCardImage({ src, alt }: { src: string; alt: string }) {
   );
 }
 
-/* ============ Page ============ */
+/* ================= Page ================= */
 function PageInner() {
   const sp = useSearchParams();
   const qsUserId = Number(sp.get("userId") ?? 0) || 0;
 
-  const [effectiveUserId, setEffectiveUserId] = useState<number>(qsUserId);
-  const [inv, setInv] = useState<Inventory | null>(null);
+  const [userId, setUserId] = useState<number>(qsUserId);
   const [name, setName] = useState<string>("My Deck");
+  const [inv, setInv] = useState<Inventory | null>(null);
   const [selChars, setSelChars] = useState<number[]>([]);
   const [selOthers, setSelOthers] = useState<Record<number, number>>({});
   const othersTotal = useMemo(() => Object.values(selOthers).reduce((a, b) => a + b, 0), [selOthers]);
 
-  // 0) auto-detect user id ถ้าไม่มี ?userId=
+  // 0) if ไม่มี ?userId= ให้ลอง /api/me
   useEffect(() => {
-    if (qsUserId) return; // มีใน URL แล้ว
+    if (qsUserId) return; // ระบุมาแล้ว
     (async () => {
       try {
         const me = await getJSON<MeResp>("/api/me");
         const uid = Number(me.user?.id ?? 0);
-        if (uid) setEffectiveUserId(uid);
+        if (uid) setUserId(uid);
       } catch {
-        // เงียบ ๆ ถ้าเรียกไม่ได้
+        // ปล่อยให้ว่าง/ผู้ใช้จะกด Save ไม่ได้จนกว่าจะมี userId
       }
     })();
   }, [qsUserId]);
 
-  // ถ้าใน URL มี userId → ใช้เลย
+  // sync ถ้ามี ?userId=
   useEffect(() => {
-    if (qsUserId && qsUserId !== effectiveUserId) setEffectiveUserId(qsUserId);
-  }, [qsUserId, effectiveUserId]);
+    if (qsUserId && qsUserId !== userId) setUserId(qsUserId);
+  }, [qsUserId, userId]);
 
-  // 1) โหลด inventory
+  // 1) โหลด inventory + deck พร้อมกัน → แล้วพรีฟิล
   useEffect(() => {
-    if (!effectiveUserId) return;
-    getJSON<Inventory>(`/api/inventory?userId=${effectiveUserId}`)
-      .then(setInv)
-      .catch((e) => console.error("load inventory failed:", e));
-  }, [effectiveUserId]);
+    if (!userId) return;
+    (async () => {
+      try {
+        const [invRaw, deckResp] = await Promise.all([
+          getJSON<unknown>(`/api/inventory?userId=${userId}`),
+          getJSON<DeckResp>(`/api/deck?userId=${userId}`),
+        ]);
+        const norm = normalizeInventory(invRaw);
+        setInv(norm);
 
-  // 2) โหลดเด็กล่าสุด → พรีฟิล
-  useEffect(() => {
-    if (!effectiveUserId) return;
-    getJSON<GetDeckResp>(`/api/deck?userId=${effectiveUserId}`)
-      .then((resp) => {
-        if (!resp.deck) return;
-        setName(resp.deck.name || "My Deck");
-        setSelChars(resp.deck.characters ?? []);
-        const rec: Record<number, number> = {};
-        for (const it of resp.deck.cards ?? []) rec[it.cardId] = it.count;
-        setSelOthers(rec);
-      })
-      .catch((e) => console.warn("load deck failed:", e));
-  }, [effectiveUserId]);
+        if (deckResp.deck) {
+          setName(deckResp.deck.name || "My Deck");
+          setSelChars(deckResp.deck.characters ?? []);
+          const rec: Record<number, number> = {};
+          for (const it of deckResp.deck.cards ?? []) rec[it.cardId] = it.count;
+          setSelOthers(rec);
+        } else {
+          // ไม่มีเด็ค → เคลียร์ค่าที่เลือกไว้
+          setSelChars([]);
+          setSelOthers({});
+        }
+      } catch (e) {
+        console.error("load deck/inventory failed:", e);
+      }
+    })();
+  }, [userId]);
 
   function toggleChar(id: number) {
     setSelChars((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : prev.length >= 3 ? prev : [...prev, id]));
@@ -134,12 +178,11 @@ function PageInner() {
       return next;
     });
   }
-
   async function onSave() {
-    if (!effectiveUserId) return alert("ไม่พบ userId (แนบ ?userId= ใน URL หรือให้ระบบล็อกอินอัตโนมัติ)");
+    if (!userId) return alert("ไม่พบ userId (แนบ ?userId= ใน URL หรือ login เพื่อให้ระบบหาให้อัตโนมัติ)");
     if (selChars.length === 0) return alert("เลือกตัวละครอย่างน้อย 1 ตัวก่อนนะ");
     const body: SaveBody = {
-      userId: effectiveUserId,
+      userId,
       name,
       characters: selChars,
       cards: Object.entries(selOthers).map(([id, count]) => ({ cardId: Number(id), count: Number(count) })),
@@ -166,8 +209,8 @@ function PageInner() {
         <div className="font-semibold mb-2">Characters</div>
         <div className="flex flex-wrap gap-3">
           {CHAR_CARDS.map((c) => {
-            const owned = inv?.chars?.[c.id] ?? 0;
-            const selected = selChars.includes(c.id);
+            const owned = inv?.chars?.[c.id] ?? 0;              // << owned จาก inventory (normalize แล้ว)
+            const selected = selChars.includes(c.id);           // << พรีฟิลจาก deck
             return (
               <button
                 key={c.id}
@@ -193,8 +236,8 @@ function PageInner() {
         <div className="font-semibold mb-2">Supports & Events</div>
         <div className="flex flex-wrap gap-3">
           {OTHER_CARDS.map((o) => {
-            const owned = inv?.others?.[o.id] ?? 0;
-            const picked = selOthers[o.id] ?? 0;
+            const owned = inv?.others?.[o.id] ?? 0;           // << owned จาก inventory
+            const picked = selOthers[o.id] ?? 0;              // << พรีฟิลจาก deck
             return (
               <div
                 key={`${o.kind}-${o.id}`}
