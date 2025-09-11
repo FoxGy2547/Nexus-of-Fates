@@ -1,45 +1,23 @@
-import { Pool } from "pg";
-import type { QueryResultRow } from "pg";
+// src/lib/db.ts
+import { Pool, QueryResultRow } from "pg";
 
-/** เก็บ pool ไว้ระดับ global กันสร้างซ้ำทุก request */
 type GlobalWithPg = typeof globalThis & { __PG_POOL__?: Pool };
 const g = globalThis as GlobalWithPg;
 
-function buildPool(): Pool {
-  const { DATABASE_URL } = process.env;
-  if (DATABASE_URL) {
-    return new Pool({
-      connectionString: DATABASE_URL,
-      ssl: { rejectUnauthorized: false }, // Supabase ส่วนใหญ่ต้อง SSL
-      max: 10,
+export function getPool(): Pool {
+  if (!g.__PG_POOL__) {
+    const url = process.env.DATABASE_URL;
+    if (!url) throw new Error("Missing DATABASE_URL");
+
+    g.__PG_POOL__ = new Pool({
+      connectionString: url,
+      max: 1,
+      idleTimeoutMillis: 30_000,
+      // Vercel/Supabase ต้องเปิด SSL; Supabase ใช้ cert proxy → ปิด verify
+      ssl: { rejectUnauthorized: false },
     });
   }
-
-  // รองรับตั้งค่าแบบแยกตัวแปร
-  const host = process.env.PGHOST ?? process.env.DB_HOST;
-  const user = process.env.PGUSER ?? process.env.DB_USER;
-  const password = process.env.PGPASSWORD ?? process.env.DB_PASS;
-  const database = process.env.PGDATABASE ?? process.env.DB_NAME;
-  const port = Number(process.env.PGPORT ?? process.env.DB_PORT ?? 5432);
-
-  if (!host || !user || !database) {
-    throw new Error("Missing PG connection envs");
-  }
-
-  return new Pool({
-    host,
-    user,
-    password,
-    database,
-    port,
-    ssl: { rejectUnauthorized: false },
-    max: 10,
-  });
-}
-
-export function getPool(): Pool {
-  if (!g.__PG_POOL__) g.__PG_POOL__ = buildPool();
-  return g.__PG_POOL__!;
+  return g.__PG_POOL__;
 }
 
 /** query หลายแถว */
@@ -47,7 +25,9 @@ export async function query<T extends QueryResultRow>(
   sql: string,
   params: ReadonlyArray<unknown> = [],
 ): Promise<T[]> {
-  const res = await getPool().query<T>(sql, [...params]);
+  // pg ระบุ values: any[] → cast เฉพาะขอบต่อไลบรารี
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const res = await getPool().query<T>(sql, params as any[]);
   return res.rows;
 }
 
@@ -56,6 +36,7 @@ export async function queryOne<T extends QueryResultRow>(
   sql: string,
   params: ReadonlyArray<unknown> = [],
 ): Promise<T | null> {
-  const res = await getPool().query<T>(sql, [...params]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const res = await getPool().query<T>(sql, params as any[]);
   return res.rows[0] ?? null;
 }
