@@ -2,7 +2,7 @@
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import type { Session } from "next-auth";
-import { getPool } from "@/lib/db";
+import { supa } from "@/lib/supabase";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,35 +10,54 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   try {
     const session = (await getServerSession()) as Session | null;
-
-    if (!session?.user?.email) {
+    if (!session?.user) {
       return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
     }
 
-    const pool = getPool();
-    const { rows } = await pool.query(
-      `SELECT id, username, email, discord_id
-         FROM users
-        WHERE email = $1
-        ORDER BY created_at DESC
-        LIMIT 1`,
-      [session.user.email]
-    );
+    const email = session.user.email ?? null;
+    const providerId = (session as unknown as { user?: { id?: string } })?.user?.id ?? null;
 
-    if (rows.length === 0) {
+    // หา user ด้วย email ก่อน ไม่เจอค่อยลอง discord_id
+    let user:
+      | { id: number; username: string | null; email: string | null; discord_id: string | null }
+      | null = null;
+
+    if (email) {
+      const { data, error } = await supa
+        .from("users")
+        .select("id, username, email, discord_id")
+        .eq("email", email)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (error) throw error;
+      if (data) user = { id: Number(data.id), username: data.username, email: data.email, discord_id: data.discord_id };
+    }
+
+    if (!user && providerId) {
+      const { data, error } = await supa
+        .from("users")
+        .select("id, username, email, discord_id")
+        .eq("discord_id", String(providerId))
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (error) throw error;
+      if (data) user = { id: Number(data.id), username: data.username, email: data.email, discord_id: data.discord_id };
+    }
+
+    if (!user) {
       return NextResponse.json({ error: "user not found in DB" }, { status: 404 });
     }
 
-    const u = rows[0];
     return NextResponse.json({
-      userId: Number(u.id),
-      username: u.username,
-      email: u.email,
-      discordId: u.discord_id,
+      userId: user.id,
+      username: user.username,
+      email: user.email,
+      discordId: user.discord_id,
     });
-  } catch (err) {
-    // อย่าโยน HTML — ตอบ JSON ให้หน้า client parse ได้เสมอ
-    const msg = err instanceof Error ? err.message : "internal error";
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: `me route failed: ${msg}` }, { status: 500 });
   }
 }
