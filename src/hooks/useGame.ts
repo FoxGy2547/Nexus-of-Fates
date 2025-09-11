@@ -1,3 +1,4 @@
+// src/hooks/useGame.ts
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -80,12 +81,10 @@ async function postGame<TExpected extends object>(payload: ApiPayload): Promise<
 /* ========================= local user identity ========================= */
 function loadOrCreateUser(): PlayerInfo {
   try {
-    const raw =
-      typeof window !== "undefined" ? window.localStorage.getItem("nof.user") : null;
+    const raw = typeof window !== "undefined" ? window.localStorage.getItem("nof.user") : null;
     if (raw) {
       const parsed = JSON.parse(raw) as PlayerInfo;
-      if (parsed && typeof parsed.userId === "string" && parsed.userId.length > 0)
-        return parsed;
+      if (parsed && typeof parsed.userId === "string" && parsed.userId.length > 0) return parsed;
     }
   } catch {
     // ignore
@@ -96,8 +95,7 @@ function loadOrCreateUser(): PlayerInfo {
     avatar: null,
   };
   try {
-    if (typeof window !== "undefined")
-      window.localStorage.setItem("nof.user", JSON.stringify(user));
+    if (typeof window !== "undefined") window.localStorage.setItem("nof.user", JSON.stringify(user));
   } catch {
     // ignore
   }
@@ -110,17 +108,15 @@ type UseGameReturn = {
   user: PlayerInfo;
   state: ClientState | null;
 
+  // match the calls used on page.tsx
   ready: () => Promise<void>;
   endPhase: () => Promise<void>;
   playCard: (index: number) => Promise<void>;
   discardForInfinite: (index: number) => Promise<void>;
-  combat: (
-    attacker: number,
-    target: number | null,
-    mode: "basic" | "skill" | "ult"
-  ) => Promise<void>;
+  combat: (attacker: number, target: number | null, mode: "basic" | "skill" | "ult") => Promise<void>;
   ackCoin: () => Promise<void>;
 
+  // optional helpers (useful on lobby page)
   createRoom?: (roomId: string) => Promise<void>;
   joinRoom?: (roomId: string) => Promise<void>;
 };
@@ -129,6 +125,7 @@ export function useGame(roomId: string): UseGameReturn {
   const user = useMemo(loadOrCreateUser, []);
   const [state, setState] = useState<ClientState | null>(null);
 
+  // role is derived from state.you ifมี (ตอนอยู่ในห้องแล้ว)
   const role: "host" | "player" | "-" = useMemo(() => {
     if (!state?.you) return "-";
     return state.you === "p1" ? "host" : "player";
@@ -140,16 +137,6 @@ export function useGame(roomId: string): UseGameReturn {
   }, [roomId]);
 
   /* -------- actions -------- */
-  const fetchState = useCallback(async () => {
-    if (!refRoom.current) return;
-    const data = await postGame<ApiOk<{ state: ClientState }>>({
-      action: "getState",
-      roomId: refRoom.current,
-      userId: user.userId,
-    });
-    setState(data.state);
-  }, [user.userId]);
-
   const ready = useCallback(async () => {
     await postGame<ApiOk<{ state: ClientState }>>({
       action: "ready",
@@ -176,7 +163,7 @@ export function useGame(roomId: string): UseGameReturn {
         index,
       }).then((res) => setState(res.state));
     },
-    [roomId, user.userId]
+    [roomId, user.userId],
   );
 
   const discardForInfinite = useCallback(
@@ -188,7 +175,7 @@ export function useGame(roomId: string): UseGameReturn {
         index,
       }).then((res) => setState(res.state));
     },
-    [roomId, user.userId]
+    [roomId, user.userId],
   );
 
   const combat = useCallback(
@@ -202,7 +189,7 @@ export function useGame(roomId: string): UseGameReturn {
         mode,
       }).then((res) => setState(res.state));
     },
-    [roomId, user.userId]
+    [roomId, user.userId],
   );
 
   const ackCoin = useCallback(async () => {
@@ -213,7 +200,7 @@ export function useGame(roomId: string): UseGameReturn {
     }).then((res) => setState(res.state));
   }, [roomId, user.userId]);
 
-  // (optional) expose create/join forหน้า lobby
+  // (optional) expose create/join สำหรับหน้า lobby
   const createRoom = useCallback(
     async (rid: string) => {
       await postGame<ApiOk<{ roomId: string }>>({
@@ -222,7 +209,7 @@ export function useGame(roomId: string): UseGameReturn {
         user,
       });
     },
-    [user]
+    [user],
   );
 
   const joinRoom = useCallback(
@@ -233,32 +220,52 @@ export function useGame(roomId: string): UseGameReturn {
         user,
       });
     },
-    [user]
+    [user],
   );
 
-  /* -------- initial join + first state -------- */
-  // สำคัญ: เข้าห้อง (joinRoom) อัตโนมัติหนึ่งครั้งเมื่อเข้า/เปลี่ยน roomId
-  const didJoinRef = useRef<string | null>(null);
+  /* -------- initial fetch + auto-join Host -------- */
   useEffect(() => {
     if (!roomId) return;
-    didJoinRef.current = null; // reset เมื่อเปลี่ยนห้อง
-
     let alive = true;
+
     (async () => {
       try {
-        await joinRoom(roomId).catch(() => {});
-        didJoinRef.current = roomId;
-        if (alive) await fetchState();
+        const first = await postGame<ApiOk<{ state: ClientState }>>({
+          action: "getState",
+          roomId,
+          userId: user.userId,
+        });
+        if (!alive) return;
+
+        const you = first.state.you;
+        const seats =
+          (first.state.players.p1 ? 1 : 0) + (first.state.players.p2 ? 1 : 0);
+
+        if (!you && seats < 2) {
+          // จับคนนี่เข้าไปนั่งอัตโนมัติ (จะกลายเป็น Host ถ้าห้องยังว่าง)
+          await postGame<ApiOk<{ roomId: string }>>({
+            action: "joinRoom",
+            roomId,
+            user,
+          });
+          const after = await postGame<ApiOk<{ state: ClientState }>>({
+            action: "getState",
+            roomId,
+            userId: user.userId,
+          });
+          if (alive) setState(after.state);
+        } else {
+          setState(first.state);
+        }
       } catch (err) {
-        console.error("[joinRoom:init] failed:", err);
+        console.error("[getState:init] failed:", err);
       }
     })();
-    return () => {
-      alive = false;
-    };
-  }, [roomId, joinRoom, fetchState]);
 
-  /* -------- polling -------- */
+    return () => { alive = false; };
+  }, [roomId, user]);
+
+  /* -------- light polling -------- */
   useEffect(() => {
     if (!roomId) return;
 

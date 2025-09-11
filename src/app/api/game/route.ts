@@ -175,8 +175,9 @@ async function loadRoom(roomId: string): Promise<{ state: RoomState; version: nu
         .maybeSingle();
       if (error) throw error;
       if (data) {
-        const state = data.state_json as RoomState;
-        return { state, version: Number(data.version) };
+        const row = data as unknown as RoomRow;
+        const state = row.state_json as RoomState;
+        return { state, version: Number(row.version) };
       }
       const state = freshRoom(id);
       await supa.from("rooms").insert({ id, version: 1, state_json: state });
@@ -213,11 +214,14 @@ async function saveRoom(
         .select("version")
         .maybeSingle();
       if (error) throw error;
-      if (data) return Number(data.version);
+      if (data) {
+        const row = data as unknown as Pick<RoomRow,"version">;
+        return Number(row.version);
+      }
 
       if (retry >= 2) throw new Error("Conflict: room updated concurrently");
       const cur = await supa.from("rooms").select("version").eq("id", id).maybeSingle();
-      const curVer = Number((cur.data?.version ?? 1) as number);
+      const curVer = Number(((cur.data as unknown as RoomRow | null)?.version ?? 1));
       return saveRoom(id, nextState, curVer, retry + 1);
     } catch {
       // fall back
@@ -246,7 +250,7 @@ async function qUserBy(key: "discord_id" | "email" | "username", value: string):
       .eq(key, value)
       .maybeSingle();
     if (error) return null;
-    return data as unknown as UserRow | null;
+    return (data ?? null) as unknown as UserRow | null;
   } catch { return null; }
 }
 async function findUserRowByAny(key: string, display?: string | null): Promise<UserRow | null> {
@@ -358,36 +362,20 @@ function stateForClient(room: RoomState, currentUserId?: string) {
   };
 }
 
-/* ==== anonymous helpers (ให้ Ready ได้แม้ไม่มี userId) ==== */
-function ensureSeat(room: RoomState, side: Side, fallbackName: string) {
-  if (!room.players[side]) room.players[side] = { userId: `anon:${side}`, name: fallbackName };
-}
-function pickSideForAnonymousReady(room: RoomState): Side | null {
-  if (!room.ready.p1) return "p1";
-  if (!room.ready.p2) return "p2";
-  return null;
-}
-
 /* ===== basic ops ===== */
 function createRoomOp(room: RoomState, user: PlayerInfo) {
-  if (!room.players.p1 && !room.players.p2) room.players.p1 = user;
+  // ห้องใหม่ -> จับคนสร้างเป็น p1 (Host)
+  if (!room.players.p1 && !room.players.p2) {
+    room.players.p1 = user;
+  }
 }
-// ---------- แทนที่ joinRoomOp เดิม ----------
 function joinRoomOp(room: RoomState, user: PlayerInfo) {
   const s = sideOf(room, user.userId);
   if (s) { room.players[s] = user; return; }
-
-  // ถ้ามีเก้าอี้ anonymous ให้ยึดมาเป็นของผู้ใช้จริง
-  if (room.players.p1?.userId?.startsWith("anon:")) { room.players.p1 = user; return; }
-  if (room.players.p2?.userId?.startsWith("anon:")) { room.players.p2 = user; return; }
-
-  // ถ้าที่นั่งว่างก็ลงได้ตามปกติ
   if (!room.players.p1) { room.players.p1 = user; return; }
   if (!room.players.p2) { room.players.p2 = user; return; }
-
   throw new Error("Room is full");
 }
-
 function markReady(room: RoomState, userId: string) {
   const s = sideOf(room, userId);
   if (!s) throw new Error("Not in room");
@@ -574,7 +562,7 @@ export async function POST(req: Request) {
     if (action === "createRoom") {
       const id = roomId;
       const { state, version } = await loadRoom(id);
-      if (body.user?.userId) createRoomOp(state, body.user);
+      if (body.user?.userId) createRoomOp(state, body.user); // creator เป็น Host
       await saveRoom(id, state, version);
       return NextResponse.json({ ok: true, roomId: id });
     }
@@ -594,42 +582,26 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
       }
 
-      // ---------- ในสวิตช์ case "ready": แทนบล็อกเดิมทั้งก้อน ----------
       case "ready": {
         const user = body.user as PlayerInfo | undefined;
+        const uid = String(user?.userId || body.userId || "");
+        if (!uid) throw new Error("Missing userId");
 
-        // ถ้ามี user จริง แต่ยังไม่ได้นั่ง -> จับนั่ง (หรือยึดที่นั่ง anon)
-        if (user?.userId) {
-          const s0 = sideOf(room, user.userId);
-          if (!s0) {
-            joinRoomOp(room, user);
-          } else {
-            // sync ชื่อ/รูป
-            room.players[s0] = user;
-          }
-        }
-
-        // หา side ของผู้ที่กดยืนยัน
-        let uid = String(user?.userId || body.userId || "");
-        let s = uid ? sideOf(room, uid) : null;
-
-        // โหมด anonymous: ไม่มี userId จริง → สร้างที่นั่งชั่วคราวเฉพาะกรณีที่ยังมีที่ว่าง
+        // ถ้ายังไม่มีที่นั่ง -> จับนั่งลงที่ว่าง (p1 ก่อน, ไม่งั้น p2)
+        let s = sideOf(room, uid);
         if (!s) {
-          const side = pickSideForAnonymousReady(room); // คืน p1/p2 ถ้าที่นั่งนั้นยังไม่ ready
-          if (side) {
-            ensureSeat(room, side, side === "p1" ? "Host" : "Player");
-            s = side;
-            uid = room.players[side]!.userId; // จะเป็น "anon:p1/p2"
-          } else {
-            // ไม่มีที่ว่างแล้ว
-            throw new Error("Room is full");
-          }
+          const seatUser: PlayerInfo = user ?? { userId: uid, name: null, avatar: null };
+          if (!room.players.p1) { room.players.p1 = seatUser; s = "p1"; }
+          else if (!room.players.p2) { room.players.p2 = seatUser; s = "p2"; }
+          else { throw new Error("Room is full"); }
+        } else {
+          if (user) room.players[s] = user; // sync ชื่อ/รูป
         }
 
-        // ทำเครื่องหมาย ready ให้ฝั่งนั้น
+        // ทำเครื่องหมายพร้อม
         room.ready[s] = true;
 
-        // ถ้าพร้อมทั้งสองฝั่ง และเกมยังไม่เริ่ม → เริ่มเกม
+        // เริ่มเกมเมื่อครบ
         if (room.ready.p1 && room.ready.p2 && room.mode !== "play") {
           await startGame(room);
         }
