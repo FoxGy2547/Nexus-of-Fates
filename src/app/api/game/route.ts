@@ -1,8 +1,7 @@
 // src/app/api/game/route.ts
 import { NextResponse } from "next/server";
 import cardsDataJson from "@/data/cards.json";
-import { query, queryOne } from "@/lib/db";
-import type { QueryResultRow } from "pg";
+import { supa } from "@/lib/supabase"; // ใช้ client จาก lib/supabase.ts
 
 export const runtime = "nodejs";
 
@@ -43,24 +42,15 @@ type CardsData = {
 };
 const cardsData = cardsDataJson as CardsData;
 
-/* ========================= DB flag (เปิดเมื่อมี ENV) ========================= */
+/* ========================= เปิดใช้ DB เมื่อมีค่า Supabase ========================= */
 const DB_ON = Boolean(
-  process.env.DATABASE_URL ||
-    process.env.DB_HOST ||
-    process.env.PGHOST ||
-    process.env.DB_URL
+  process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 );
 
 /* ========================= Types & Room ========================= */
 export type Side = "p1" | "p2";
 type DicePool = Record<string, number>;
-type UnitVM = {
-  code: string;
-  element: string;
-  attack: number;
-  hp: number;
-  gauge?: number;
-};
+type UnitVM = { code: string; element: string; attack: number; hp: number; gauge?: number };
 type PlayerInfo = { userId: string; name?: string | null; avatar?: string | null };
 
 type RoomState = {
@@ -90,8 +80,8 @@ type GlobalWithStore = typeof globalThis & {
 const gs = globalThis as GlobalWithStore;
 if (!gs.__NOF_STORE__) gs.__NOF_STORE__ = new Map();
 
-/* ========================= Persistence ========================= */
-type RoomRow = { id: string; version: number; state_json: unknown };
+/* ========================= Persistence (Supabase) ========================= */
+type RoomRow = { id: string; version: number; state_json: unknown; updated_at?: string | null };
 
 function freshRoom(id: string): RoomState {
   return {
@@ -119,24 +109,26 @@ async function loadRoom(roomId: string): Promise<{ state: RoomState; version: nu
 
   if (DB_ON) {
     try {
-      const row = await queryOne<RoomRow>(
-        "select id, version, state_json from public.rooms where id = $1 limit 1",
-        [id]
-      );
-      if (row) {
-        const state = row.state_json as RoomState;
-        return { state, version: Number(row.version) };
+      const { data } = await supa
+        .from("rooms")
+        .select("id, version, state_json")
+        .eq("id", id)
+        .maybeSingle<{ id: string; version: number; state_json: unknown }>();
+      if (data) {
+        return { state: data.state_json as RoomState, version: Number(data.version) };
       }
+
       const state = freshRoom(id);
-      await query(
-        `insert into public.rooms (id, version, state_json)
-         values ($1, 1, $2)
-         on conflict (id) do nothing`,
-        [id, state]
-      );
+      // insert หากยังไม่มี
+      await supa.from("rooms").insert({
+        id,
+        version: 1,
+        state_json: state,
+        updated_at: new Date().toISOString(),
+      });
       return { state, version: 1 };
     } catch {
-      // DB ล้ม → ใช้ local
+      // ถ้า DB พัง ให้ตกไป local
     }
   }
 
@@ -157,24 +149,32 @@ async function saveRoom(
 
   if (DB_ON) {
     try {
-      const updated = await query<{ version: number }>(
-        `update public.rooms
-           set state_json = $2, version = version + 1, updated_at = now()
-         where id = $1 and version = $3
-         returning version`,
-        [id, nextState, prevVersion]
-      );
-      if (updated.length > 0) return Number(updated[0].version);
+      const { data, error } = await supa
+        .from("rooms")
+        .update({
+          state_json: nextState,
+          version: prevVersion + 1,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", id)
+        .eq("version", prevVersion)
+        .select("version")
+        .maybeSingle<{ version: number }>();
 
-      if (retry >= 2) throw new Error("Conflict: room updated concurrently");
-      const cur = await queryOne<{ version: number }>(
-        `select version from public.rooms where id = $1`,
-        [id]
-      );
-      const curVer = Number(cur?.version ?? 1);
-      return saveRoom(id, nextState, curVer, retry + 1);
+      if (!error && data) return Number(data.version);
+
+      if (retry < 2) {
+        const { data: cur } = await supa
+          .from("rooms")
+          .select("version")
+          .eq("id", id)
+          .maybeSingle<{ version: number }>();
+        const curVer = Number(cur?.version ?? 1);
+        return saveRoom(id, nextState, curVer, retry + 1);
+      }
+      throw new Error("Conflict: room updated concurrently");
     } catch {
-      // DB ล้ม → ใช้ local
+      // ตกมาใช้ local ถ้า DB ล้ม
     }
   }
 
@@ -261,51 +261,68 @@ function spendElement(poolD: DicePool, el: ElementKind, n: number): boolean {
   return true;
 }
 
-/* ========================= DB users/decks (optional) ========================= */
-type UserRow = { id: number; username?: string | null };
-
-async function qOne<T extends QueryResultRow>(
-  sql: string,
-  params: ReadonlyArray<unknown> = []
-): Promise<T | null> {
-  if (!DB_ON) return null;
-  try {
-    const row = await queryOne<T>(sql, params);
-    return row ?? null;
-  } catch {
-    return null;
-  }
-}
+/* ========================= DB users/decks (via Supabase) ========================= */
+type UserRow = {
+  id: number;
+  username?: string | null;
+  discord_id?: string | null;
+  email?: string | null;
+};
 
 async function findUserRowByAny(key: string, display?: string | null): Promise<UserRow | null> {
   if (!DB_ON) return null;
 
+  // by discord_id
   if (/^\d{6,}$/.test(key)) {
-    const u = await qOne<UserRow>(
-      "select id, username from public.users where discord_id = $1 limit 1",
-      [key]
-    );
-    if (u) return u;
+    const { data } = await supa
+      .from("users")
+      .select("id, username")
+      .eq("discord_id", key)
+      .maybeSingle<Pick<UserRow, "id" | "username">>();
+    return (data as unknown as UserRow) ?? null;
   }
+
+  // by email
   if (/@/.test(key)) {
-    const u = await qOne<UserRow>(
-      "select id, username from public.users where email = $1 limit 1",
-      [key]
-    );
-    if (u) return u;
+    const { data } = await supa
+      .from("users")
+      .select("id, username")
+      .eq("email", key)
+      .maybeSingle<Pick<UserRow, "id" | "username">>();
+    return (data as unknown as UserRow) ?? null;
   }
+
+  // by username
   const name = display ?? key;
-  const u = await qOne<UserRow>(
-    "select id, username from public.users where username = $1 limit 1",
-    [name]
-  );
-  return u ?? null;
+  const { data } = await supa
+    .from("users")
+    .select("id, username")
+    .eq("username", name)
+    .maybeSingle<Pick<UserRow, "id" | "username">>();
+  return (data as unknown as UserRow) ?? null;
 }
 
 type CardIndex =
-  | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10
-  | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20;
-
+  | 1
+  | 2
+  | 3
+  | 4
+  | 5
+  | 6
+  | 7
+  | 8
+  | 9
+  | 10
+  | 11
+  | 12
+  | 13
+  | 14
+  | 15
+  | 16
+  | 17
+  | 18
+  | 19
+  | 20;
 type DeckDynamic = Record<`card${CardIndex}`, number | null | undefined>;
 type DeckRow = {
   id: number;
@@ -316,12 +333,15 @@ type DeckRow = {
   card_char3?: number | null;
 } & DeckDynamic;
 
-async function loadDeckFromDB(
-  userId: number
-): Promise<{ chars: string[]; deck: string[] } | null> {
-  const row = await qOne<DeckRow>("select * from public.decks where user_id = $1 limit 1", [
-    userId,
-  ]);
+async function loadDeckFromDB(userId: number): Promise<{ chars: string[]; deck: string[] } | null> {
+  if (!DB_ON) return null;
+  const { data } = await supa
+    .from("decks")
+    .select("*")
+    .eq("user_id", userId)
+    .maybeSingle<DeckRow>();
+
+  const row = (data as unknown as DeckRow | null);
   if (!row) return null;
 
   const charIdToCode = new Map<number, string>();
@@ -445,10 +465,12 @@ async function userHasDeck(
   if (!p) return { has: false, display: null };
   const u = await findUserRowByAny(p.userId, p.name ?? null);
   if (!u) return { has: false, display: p.name ?? null };
-  const d = await qOne<{ id: number }>("select id from public.decks where user_id = $1 limit 1", [
-    u.id,
-  ]);
-  return { has: !!d, display: p.name ?? null };
+  const { data } = await supa
+    .from("decks")
+    .select("id")
+    .eq("user_id", u.id)
+    .maybeSingle<{ id: number }>();
+  return { has: !!data, display: p.name ?? null };
 }
 async function checkMissingDecks(room: RoomState): Promise<string[]> {
   const missing: string[] = [];
@@ -625,7 +647,7 @@ function ensureMember(room: RoomState, user?: PlayerInfo) {
     try {
       joinRoomOp(room, user);
     } catch {
-      // ห้องเต็มก็ช่างมัน แต่ถ้าอยู่แล้วจะไปต่อได้
+      /* ห้องเต็มก็ข้ามได้ */
     }
   } else {
     room.players[s] = user; // sync ชื่อ/อวาตาร์
