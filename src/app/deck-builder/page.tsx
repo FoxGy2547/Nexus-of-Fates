@@ -13,11 +13,25 @@ type EventCard     = { id: number;     code: string; name: string; element: stri
 type CardsData = { characters: CharacterCard[]; supports: SupportCard[]; events: EventCard[] };
 const cardsData = cardsDataJson as CardsData;
 
-/* ========= helpers ========= */
+/* ========= API types ========= */
+type InvItem = { cardId: number; code: string; kind: "character" | "support" | "event"; qty: number };
+type InvRes  = { items: InvItem[] };
+type DeckRes = { ok: true; deckId: number | null; name: string; characters: number[]; cards: { cardId: number; count: number }[] };
+
 const OTHER_ID_BASE = 100; // 101..103
 const FRAME_W = 256;
 const FRAME_H = 384;
 
+/* ========= Suspense wrapper ========= */
+export default function Page() {
+  return (
+    <Suspense fallback={<main className="p-6 text-sm opacity-70">Loading deck…</main>}>
+      <DeckBuilderScreen />
+    </Suspense>
+  );
+}
+
+/* ========= helpers ========= */
 function codeToPrettyName(code: string) {
   return code
     .split("_")
@@ -35,23 +49,10 @@ function cardImagePath(code: string, kind: "character" | "support" | "event"): s
   return kind === "character" ? `/char_cards/${file}` : `/cards/${file}`;
 }
 
-type InvItem = { cardId: number; code: string; kind: "character" | "support" | "event"; qty: number };
-type InvRes = { items: InvItem[] };
-type DeckRes = { ok: true; deckId: number | null; name: string; characters: number[]; cards: { cardId: number; count: number }[] };
-
-/* ========= Suspense wrapper ========= */
-export default function Page() {
-  return (
-    <Suspense fallback={<main className="p-6 text-sm opacity-70">Loading deck…</main>}>
-      <DeckBuilderScreen />
-    </Suspense>
-  );
-}
-
-/* ========= Real screen (ใช้ useSearchParams ได้อย่างปลอดภัย) ========= */
+/* ========= Real screen ========= */
 function DeckBuilderScreen() {
   const sp = useSearchParams();
-  const userId = Number(sp.get("userId") ?? "0") || 6; // default 6 เผื่อไม่ได้ส่งมา
+  const userId = Number(sp.get("userId") ?? "0") || 6; // เปลี่ยนเลข default ได้ตามต้องการ
   const [name, setName] = useState("My Deck");
 
   // inventory (owned)
@@ -60,42 +61,37 @@ function DeckBuilderScreen() {
   const [chars, setChars] = useState<number[]>([]);
   const [others, setOthers] = useState<Record<number, number>>({ 101: 0, 102: 0, 103: 0 });
 
-  // preload := อ่านเด็คจาก /api/deck แล้วกดเลือกให้เลย
+  // preload := inventory + deck
   useEffect(() => {
     (async () => {
       const [invR, deckR] = await Promise.all([
         fetch(`/api/inventory?userId=${userId}`, { cache: "no-store" }).then((r) => r.json() as Promise<InvRes>),
         fetch(`/api/deck?userId=${userId}`, { cache: "no-store" }).then((r) => r.json() as Promise<DeckRes>),
       ]);
+
       setInv(invR.items ?? []);
+
       if (deckR?.ok) {
         setName(deckR.name || "My Deck");
         setChars(deckR.characters || []);
-        // แปลง array เป็น map สำหรับ 101..103
-        const start: Record<number, number> = { 101: 0, 102: 0, 103: 0 };
-        for (const it of deckR.cards ?? []) start[it.cardId] = it.count;
-        setOthers(start);
+        const m: Record<number, number> = { 101: 0, 102: 0, 103: 0 };
+        for (const it of deckR.cards || []) m[it.cardId] = it.count;
+        setOthers(m);
       }
     })().catch(() => {});
   }, [userId]);
 
-  // สร้าง list card ทั้งหมดจาก cards.json เพื่อเรนเดอร์
+  // สร้าง list จาก cards.json
   const charList = useMemo(
     () => cardsData.characters.map((c) => ({ id: c.char_id, code: c.code, art: cardImagePath(c.code, "character") })),
     [],
   );
-  const supportList = useMemo(
-    () => cardsData.supports.map((s) => ({ slotId: 101, code: s.code, art: cardImagePath(s.code, "support") })).slice(0, 1),
-    [],
-  );
-  const support2List = useMemo(
-    () => cardsData.supports.map((s) => ({ slotId: 102, code: s.code, art: cardImagePath(s.code, "support") })).slice(1, 2),
-    [],
-  );
-  const eventList = useMemo(
-    () => cardsData.events.map((e) => ({ slotId: 103, code: e.code, art: cardImagePath(e.code, "event") })).slice(0, 1),
-    [],
-  );
+  const [sup1] = cardsData.supports.slice(0, 1);
+  const [sup2] = cardsData.supports.slice(1, 2);
+  const [evt1] = cardsData.events.slice(0, 1);
+  const sup1Meta = { slotId: 101 as const, code: sup1.code, art: cardImagePath(sup1.code, "support") };
+  const sup2Meta = { slotId: 102 as const, code: sup2.code, art: cardImagePath(sup2.code, "support") };
+  const evtMeta  = { slotId: 103 as const, code: evt1.code, art: cardImagePath(evt1.code, "event") };
 
   // owned helper
   const ownedMap = useMemo(() => {
@@ -105,28 +101,29 @@ function DeckBuilderScreen() {
   }, [inv]);
 
   // select/clear
-  const toggleChar = (id: number) => {
+  const toggleChar = (id: number, owned: number) => {
     setChars((prev) => {
       const has = prev.includes(id);
       if (has) return prev.filter((x) => x !== id);
-      if (prev.length >= 3) return prev; // limit 3
+      // อนุญาตคลิกเฉพาะกรณีมีของ หรือ ช่องยังว่าง (<=3) และไม่ได้บังคับให้จางทั้งหน้า
+      if (prev.length >= 3) return prev;
+      if (owned < 1) return prev; // ไม่มีของจริง ๆ ก็ไม่ให้เพิ่มใหม่ แต่ถ้าเดิมในเด็คจะโชว์อยู่แล้ว
       return [...prev, id];
     });
   };
-  const inc = (slotId: number) =>
+  const totalOthers = (m: Record<number, number>) => (m[101] ?? 0) + (m[102] ?? 0) + (m[103] ?? 0);
+  const inc = (slotId: 101 | 102 | 103, owned: number) =>
     setOthers((p) => {
       const next = { ...p };
-      const own = slotId === 101 ? (ownedMap.get(supportList[0]?.code ?? "") ?? 0) : slotId === 102 ? (ownedMap.get(support2List[0]?.code ?? "") ?? 0) : (ownedMap.get(eventList[0]?.code ?? "") ?? 0);
-      if ((next[slotId] ?? 0) < own && totalOthers(next) < 20) next[slotId] = (next[slotId] ?? 0) + 1;
+      if ((next[slotId] ?? 0) < owned && totalOthers(next) < 20) next[slotId] = (next[slotId] ?? 0) + 1;
       return next;
     });
-  const dec = (slotId: number) =>
+  const dec = (slotId: 101 | 102 | 103) =>
     setOthers((p) => {
       const next = { ...p };
       if ((next[slotId] ?? 0) > 0) next[slotId] = (next[slotId] ?? 0) - 1;
       return next;
     });
-  const totalOthers = (m: Record<number, number>) => (m[101] ?? 0) + (m[102] ?? 0) + (m[103] ?? 0);
 
   // save
   const onSave = async () => {
@@ -140,7 +137,11 @@ function DeckBuilderScreen() {
         { cardId: 103, count: others[103] ?? 0 },
       ],
     };
-    const res = await fetch("/api/deck", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const res = await fetch("/api/deck", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
     const j = await res.json();
     if (!res.ok) {
       alert(j?.error || "Save failed");
@@ -159,7 +160,7 @@ function DeckBuilderScreen() {
           placeholder="Deck name"
         />
         <div className="ml-auto text-sm opacity-70">
-          Chars {chars.length}/3 • Others {totalOthers(others)}/20
+          Chars {chars.length}/3 • Others {totalOthers(others)}/20 • User #{userId}
         </div>
         <button className="ml-3 px-4 py-2 rounded bg-emerald-600" onClick={onSave}>
           Save
@@ -171,14 +172,17 @@ function DeckBuilderScreen() {
         <h2 className="font-semibold mb-2">Characters</h2>
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
           {charList.map((c) => {
-            const selected = chars.includes(c.id);
-            const owned = ownedMap.get(c.code) ?? 0;
-            const disabled = !selected && (chars.length >= 3 || owned < 1);
+            const selected = chars.includes(c.id);          // จากเด็คเดิมหรือเลือกใหม่
+            const owned = ownedMap.get(c.code) ?? 0;        // จำนวนที่มี
+            const cannotAdd = !selected && (owned < 1 || chars.length >= 3);
+
             return (
               <button
                 key={c.id}
-                onClick={() => !disabled && toggleChar(c.id)}
-                className={`relative rounded-lg border bg-black/30 overflow-hidden ${selected ? "border-emerald-500" : "border-white/10"} ${disabled ? "opacity-40 cursor-not-allowed" : "hover:border-white/30"}`}
+                onClick={() => !cannotAdd && toggleChar(c.id, owned)}
+                className={`relative rounded-lg border bg-black/30 overflow-hidden
+                  ${selected ? "border-emerald-500" : "border-white/10"}
+                  ${cannotAdd ? "cursor-not-allowed" : "hover:border-white/30"}`}
                 style={{ width: FRAME_W, height: FRAME_H }}
                 title={codeToPrettyName(c.code)}
               >
@@ -196,39 +200,21 @@ function DeckBuilderScreen() {
       <section>
         <h2 className="font-semibold mb-2">Supports & Events</h2>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {[supportList[0], support2List[0], eventList[0]].filter(Boolean).map((it, idx) => {
-            const slotId = (101 + idx) as 101 | 102 | 103;
-            const owned =
-              slotId === 101 ? (ownedMap.get(supportList[0]!.code) ?? 0) :
-              slotId === 102 ? (ownedMap.get(support2List[0]!.code) ?? 0) :
-                                (ownedMap.get(eventList[0]!.code) ?? 0);
-            const cnt = others[slotId] ?? 0;
-            const title =
-              slotId === 101 ? supportList[0]!.code :
-              slotId === 102 ? support2List[0]!.code : eventList[0]!.code;
-
+          {[sup1Meta, sup2Meta, evtMeta].map((it) => {
+            const owned = ownedMap.get(it.code) ?? 0;
+            const cnt = others[it.slotId] ?? 0;
             return (
-              <div key={slotId} className="rounded-lg border border-white/10 bg-black/30 p-2">
+              <div key={it.slotId} className="rounded-lg border border-white/10 bg-black/30 p-2">
                 <div className="relative" style={{ width: FRAME_W, height: FRAME_H }}>
-                  <Image
-                    src={
-                      slotId === 101 ? supportList[0]!.art :
-                      slotId === 102 ? support2List[0]!.art  : eventList[0]!.art
-                    }
-                    alt={title}
-                    fill
-                    sizes="100%"
-                    className="object-contain"
-                    unoptimized
-                  />
-                  <div className="absolute left-2 top-2 text-[11px] bg-black/70 rounded px-1">#{slotId - OTHER_ID_BASE}</div>
+                  <Image src={it.art} alt={it.code} fill sizes="100%" className="object-contain" unoptimized />
+                  <div className="absolute left-2 top-2 text-[11px] bg-black/70 rounded px-1">#{it.slotId - OTHER_ID_BASE}</div>
                   <div className="absolute right-2 top-2 text-[11px] bg-black/70 rounded px-1">owned {owned}</div>
-                  <div className="absolute left-2 bottom-2 text-sm">{codeToPrettyName(title)}</div>
+                  <div className="absolute left-2 bottom-2 text-sm">{codeToPrettyName(it.code)}</div>
                 </div>
                 <div className="mt-2 flex items-center gap-2">
-                  <button className="px-2 py-1 rounded bg-neutral-800" onClick={() => dec(slotId)}>-</button>
+                  <button className="px-2 py-1 rounded bg-neutral-800" onClick={() => dec(it.slotId)}>-</button>
                   <div className="min-w-6 text-center tabular-nums">{cnt}</div>
-                  <button className="px-2 py-1 rounded bg-neutral-700" onClick={() => inc(slotId)}>+</button>
+                  <button className="px-2 py-1 rounded bg-neutral-700" onClick={() => inc(it.slotId, owned)}>+</button>
                 </div>
               </div>
             );
