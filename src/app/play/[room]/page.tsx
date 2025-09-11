@@ -64,13 +64,47 @@ const ELEMENT_ICON: Record<string, string> = {
   Infinite: "/dice/infinite.png",
 };
 
-// code -> image path
-const CARD_IMG: Record<string, string> = Object.fromEntries(
-  ([...cardsData.characters, ...cardsData.supports, ...cardsData.events] as Array<{
-    code: string;
-    art: string;
-  }>).map((c) => [c.code, `/char_cards/${c.art}` as const]),
-) as Record<string, string>;
+/* ===================== image helper (ดึงจาก cards.json) ===================== */
+
+/** CODE → "Pretty Name" (BLAZE_KNIGHT -> Blaze Knight) */
+function codeToPrettyName(code: string): string {
+  return (code || "")
+    .split("_")
+    .map((p) => p.toLowerCase())
+    .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
+    .join(" ");
+}
+
+/** map จาก code → art file (ตัวอักษรใหญ่หมดเพื่อเทียบแบบไม่งอแง) */
+const CHAR_ART = new Map<string, string>(
+  cardsData.characters.map((c) => [c.code.toUpperCase(), c.art]),
+);
+const SUPP_ART = new Map<string, string>(
+  cardsData.supports.map((c) => [c.code.toUpperCase(), c.art]),
+);
+const EVENT_ART = new Map<string, string>(
+  cardsData.events.map((c) => [c.code.toUpperCase(), c.art]),
+);
+
+/** คืน path รูปที่ถูกต้องตามชนิดการ์ด พร้อม encodeURI กันช่องว่าง */
+function imagePathByCode(code: string): string {
+  const key = code.toUpperCase();
+  if (CHAR_ART.has(key)) {
+    const art = CHAR_ART.get(key)!;
+    return encodeURI(`/char_cards/${art}`);
+  }
+  if (SUPP_ART.has(key)) {
+    const art = SUPP_ART.get(key)!;
+    return encodeURI(`/cards/${art}`);
+  }
+  if (EVENT_ART.has(key)) {
+    const art = EVENT_ART.get(key)!;
+    return encodeURI(`/cards/${art}`);
+  }
+  // fallback เผื่ออนาคตมี code ใหม่แต่ยังไม่ใส่ art ในไฟล์
+  const file = `${codeToPrettyName(code)}.png`;
+  return encodeURI(`/cards/${file}`);
+}
 
 /* ===================== small UI bits ===================== */
 function Pill({ children }: { children: React.ReactNode }) {
@@ -81,7 +115,7 @@ function sortWithPriority(keys: string[], priority: string[]) {
     const i = priority.indexOf(k);
     return i < 0 ? Number.MAX_SAFE_INTEGER : i;
   };
-  return [...keys].sort((a, b) => (at(a) - at(b)) || a.localeCompare(b));
+  return [...keys].sort((a, b) => at(a) - at(b) || a.localeCompare(b));
 }
 function DiceList({ dice, priority }: { dice: DicePool; priority: string[] }) {
   const entries = Object.entries(dice as Record<string, number>) as [string, number][];
@@ -147,13 +181,9 @@ const POS = {
 const textShadow = "0 1px 2px rgba(0,0,0,.9),0 0 2px rgba(0,0,0,.7)";
 
 function CardBase({ code }: { code: string }) {
-  const src = CARD_IMG[code];
-  return src ? (
+  const src = imagePathByCode(code);
+  return (
     <Image src={src} alt={code} fill className="object-cover rounded-lg" unoptimized />
-  ) : (
-    <div className="w-full h-full rounded-lg border border-white/20 bg-neutral-800 grid place-items-center text-sm">
-      {code}
-    </div>
   );
 }
 function CircleOverlay({ cx, cy, dPct, children }: { cx: number; cy: number; dPct: number; children: React.ReactNode }) {
@@ -451,24 +481,23 @@ export default function PlayRoomPage() {
     setCoinSpin(true);
     const t = setTimeout(() => setCoinSpin(false), 1200);
     return () => clearTimeout(t);
-  }, [cs, yourSide]); // <-- เพิ่ม cs เข้าไป
+  }, [cs, yourSide]);
 
   /* ---------- phase overlay ---------- */
   const [phaseShow, setPhaseShow] = useState(false);
 
-  // Phase > 1 โชว์เองอัตโนมัติ
   useEffect(() => {
     if (!cs || cs.mode !== "play") return;
     if (!cs.phaseNo || cs.phaseNo <= 1) return;
     setPhaseShow(true);
     const t = setTimeout(() => setPhaseShow(false), 1800);
     return () => clearTimeout(t);
-  }, [cs]); // เดิมอาจเป็น [cs?.phaseNo]
+  }, [cs]);
 
   // ปิดทอยเหรียญ แล้วค่อยโชว์ Phase #1
   const onCoinDone = () => {
     setCoinOpen(false);
-    ackCoin?.(); // แจ้ง server
+    ackCoin?.();
     setTimeout(() => {
       setPhaseShow(true);
       setTimeout(() => setPhaseShow(false), 1800);

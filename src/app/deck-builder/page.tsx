@@ -1,323 +1,209 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useState } from "react";
+import React, { Suspense, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
-import { useSearchParams, useRouter } from "next/navigation";
-import rawCards from "@/data/cards.json";
+import { useSearchParams } from "next/navigation";
+import cardsDataJson from "@/data/cards.json";
 
-/* ============ types ============ */
+/* -------------------- types -------------------- */
+type CharacterCard = {
+  char_id: number;
+  code: string;
+  name: string;
+  element: string;
+  attack: number;
+  hp: number;
+  cost: number;
+  abilityCode: string;
+  art: string;
+};
+type SupportCard = { id: number; code: string; name: string; element: string; cost: number; text: string; art: string };
+type EventCard = { id: number; code: string; name: string; element: string; cost: number; text: string; art: string };
+type CardsData = { characters: CharacterCard[]; supports: SupportCard[]; events: EventCard[] };
+const cardsData = cardsDataJson as CardsData;
 
-type Kind = "character" | "support" | "event";
-
-type InventoryItem = {
-  cardId: number; // 1..12 (characters) หรือ 101..103 (supports/events)
-  code: string;   // เช่น BLAZING_SIGIL
-  kind: Kind;
-  qty: number;    // จำนวนที่ผู้เล่นมี
+type Inventory = {
+  userId: number;
+  /** char_1..char_12 */
+  chars: Record<number, number>;
+  /** card_1..card_3 (ขณะนี้มี 3 ใบ) */
+  others: Record<number, number>;
 };
 
-type InventoryResponse = { items: InventoryItem[] } | { error: string };
 type SaveBody = {
   userId: number;
   name: string;
-  characters: number[]; // 1..12
-  cards: { cardId: number; count: number }[]; // 101..103
-};
-type SaveResponse = { ok: true; deckId: number } | { error: string };
-type MeResponse = { userId: number } | { error: string };
-type OthersState = Record<number, number>;
-
-type CodeArt = { code: string; art?: string };
-type CardsJson = {
-  characters?: unknown;
-  supports?: unknown;
-  events?: unknown;
+  characters: number[]; // char_id ตรง ๆ
+  cards: { cardId: number; count: number }[]; // id ตรง ๆ
 };
 
-/* ============ helpers ============ */
+/* -------------------- helpers -------------------- */
+function cardImg(code: string, art: string, kind: "character" | "support" | "event"): string {
+  const path = kind === "character" ? `/char_cards/${art}` : `/cards/${art}`;
+  return encodeURI(path);
+}
 
-async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, init);
-  const text = await res.text();
-  const json: unknown = text ? JSON.parse(text) : {};
-  if (!res.ok) {
-    const msg =
-      (json as { error?: string }).error ?? res.statusText ?? "Request failed";
-    throw new Error(msg);
+async function getJSON<T>(url: string): Promise<T> {
+  const r = await fetch(url, { cache: "no-store" });
+  if (!r.ok) throw new Error(await r.text().catch(() => r.statusText));
+  return (await r.json()) as T;
+}
+
+async function postJSON<T>(url: string, body: unknown): Promise<T> {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    cache: "no-store",
+    body: JSON.stringify(body),
+  });
+  const text = await r.text().catch(() => "");
+  try {
+    if (!r.ok) throw new Error(text || r.statusText);
+    return (text ? JSON.parse(text) : ({} as T)) as T;
+  } catch {
+    if (!r.ok) throw new Error(text || r.statusText);
+    return {} as T;
   }
-  return json as T;
 }
 
-/** "WAVECALLER" -> "Wavecaller", "WINDBLADE_DUELIST" -> "Windblade Duelist" */
-function codeToPrettyName(code: string): string {
-  const parts = code.includes("_") ? code.split("_") : [code];
-  return parts
-    .map((p) => {
-      const s = p.toLowerCase();
-      return s.charAt(0).toUpperCase() + s.slice(1);
-    })
-    .join(" ");
+/* -------------------- data from cards.json -------------------- */
+const CHAR_CARDS = cardsData.characters.map((c) => ({
+  id: c.char_id,
+  code: c.code,
+  name: c.name,
+  art: c.art,
+}));
+const OTHER_CARDS = [
+  ...cardsData.supports.map((s) => ({ id: s.id, code: s.code, name: s.name, art: s.art, kind: "support" as const })),
+  ...cardsData.events.map((e) => ({ id: e.id, code: e.code, name: e.name, art: e.art, kind: "event" as const })),
+];
+
+/* -------------------- UI: badge -------------------- */
+function Badge({ children }: { children: React.ReactNode }) {
+  return <span className="px-1.5 py-0.5 rounded text-[11px] bg-black/60 text-white">{children}</span>;
 }
 
-/** แปลง unknown ให้เป็นลิสต์ {code, art?} อย่างปลอดภัยโดยไม่ใช้ any */
-function parseCodeArtArray(u: unknown): CodeArt[] {
-  if (!Array.isArray(u)) return [];
-  const out: CodeArt[] = [];
-  for (const v of u) {
-    if (typeof v === "object" && v !== null) {
-      const o = v as Record<string, unknown>;
-      let code: string | null = null;
-      // เผื่อบางไฟล์ไม่มี code แต่มี name → แปลงเป็น CODE ด้วยชื่อ
-      if (typeof o.code === "string") code = o.code;
-      else if (typeof o.name === "string")
-        code = o.name.replace(/\s+/g, "_").toUpperCase();
+/* -------------------- page (with suspense) -------------------- */
+function PageInner() {
+  const sp = useSearchParams();
+  const userId = Number(sp.get("userId") ?? 0) || 0;
 
-      if (code) {
-        const art =
-          typeof o.art === "string" && o.art.trim().length > 0
-            ? o.art
-            : undefined;
-        out.push({ code, art });
-      }
-    }
-  }
-  return out;
-}
-
-/** หาไฟล์รูปจาก cards.json ด้วย code */
-function getArtFromCardsJson(code: string): string | null {
-  const data = rawCards as unknown as CardsJson;
-  const pools: CodeArt[] = [
-    ...parseCodeArtArray(data.characters),
-    ...parseCodeArtArray(data.supports),
-    ...parseCodeArtArray(data.events),
-  ];
-  const hit = pools.find(
-    (x) => x.code.toUpperCase() === code.toUpperCase() && x.art
-  );
-  return hit?.art ?? null;
-}
-
-/** สร้าง path รูป (ใช้ art จาก cards.json ถ้ามี, ไม่มีก็ fallback เป็นชื่อจาก code) */
-function cardImagePath(code: string, kind: Kind): string {
-  const art = getArtFromCardsJson(code);
-  const file = art ?? `${codeToPrettyName(code)}.png`;
-  const raw =
-    kind === "character" ? `/char_cards/${file}` : `/cards/${file}`;
-  return encodeURI(raw); // กันช่องว่าง/อักขระพิเศษ
-}
-
-/* ============ Page (wrap Suspense) ============ */
-
-export default function Page() {
-  return (
-    <Suspense
-      fallback={
-        <main className="min-h-screen p-6">
-          <div className="opacity-60">Loading deck builder…</div>
-        </main>
-      }
-    >
-      <DeckBuilderInner />
-    </Suspense>
-  );
-}
-
-/* ============ Inner component ============ */
-
-function DeckBuilderInner() {
-  const params = useSearchParams();
-  const router = useRouter();
-
-  // user ที่ใช้ inventory: query ?userId=… > /api/me
-  const [userId, setUserId] = useState<number | null>(null);
-
-  // สินค้าทั้งหมดที่ user มี (แยกไว้สองชุดเพื่อ UI)
-  const [inv, setInv] = useState<InventoryItem[]>([]);
-  const characters = useMemo(
-    () => inv.filter((x) => x.kind === "character"),
-    [inv]
-  );
-  const othersPool = useMemo(
-    () => inv.filter((x) => x.kind !== "character"),
-    [inv]
-  );
-
-  // ตัวเลือกปัจจุบัน
-  const [deckName, setDeckName] = useState<string>("My Deck");
-  const [chars, setChars] = useState<number[]>([]); // เลือกตัวละคร (id 1..12)
-  const [others, setOthers] = useState<OthersState>({}); // {101:3,102:1,...}
-
-  const totalOthers = useMemo(
-    () => Object.values(others).reduce((a, b) => a + b, 0),
-    [others]
-  );
-
-  /* ---------- resolve userId ---------- */
-  useEffect(() => {
-    const inQuery = Number(params.get("userId") ?? "0");
-    if (Number.isFinite(inQuery) && inQuery > 0) {
-      setUserId(inQuery);
-      return;
-    }
-    // fallback: เรียก /api/me
-    fetchJSON<MeResponse>("/api/me")
-      .then((res) => {
-        if ("error" in res) throw new Error(res.error);
-        setUserId(res.userId);
-      })
-      .catch((e) => {
-        alert(`me route failed: ${e instanceof Error ? e.message : String(e)}`);
-      });
-  }, [params]);
-
-  /* ---------- load inventory ---------- */
+  // inventory
+  const [inv, setInv] = useState<Inventory | null>(null);
   useEffect(() => {
     if (!userId) return;
-    fetchJSON<InventoryResponse>(`/api/inventory?userId=${userId}`)
-      .then((res) => {
-        if ("error" in res) throw new Error(res.error);
-        setInv(res.items);
-      })
+    getJSON<Inventory>(`/api/inventory?userId=${userId}`)
+      .then(setInv)
       .catch((e) => {
-        alert(
-          `load inventory failed: ${e instanceof Error ? e.message : String(e)}`
-        );
+        console.error(e);
+        alert(`โหลด inventory ไม่ได้: ${String(e)}`);
       });
   }, [userId]);
 
-  /* ---------- character pick toggle ---------- */
+  // state: เลือกตัวละคร ≤ 3
+  const [selChars, setSelChars] = useState<number[]>([]);
+  // state: การ์ดอื่น ๆ (id → count)
+  const [selOthers, setSelOthers] = useState<Record<number, number>>({});
+  // deck name
+  const [name, setName] = useState<string>("My Deck");
+
+  // ----- characters -----
   function toggleChar(id: number) {
-    setChars((prev) => {
-      const has = prev.includes(id);
-      if (has) return prev.filter((x) => x !== id);
-      if (prev.length >= 3) return prev; // เต็ม 3
+    setSelChars((prev) => {
+      if (prev.includes(id)) return prev.filter((x) => x !== id);
+      if (prev.length >= 3) return prev;
       return [...prev, id];
     });
   }
 
-  /* ---------- others add/remove ---------- */
-  function canAdd(owned: number, current: number): boolean {
-    return totalOthers < 20 && current < owned;
-  }
-
-  function addOne(cardId: number, owned: number) {
-    setOthers((prev) => {
-      const cur = prev[cardId] ?? 0;
-      if (!canAdd(owned, cur)) return prev;
-      return { ...prev, [cardId]: cur + 1 };
+  // ----- supports/events -----
+  function addOther(id: number) {
+    setSelOthers((prev) => {
+      const next = { ...prev, [id]: Math.min(20, (prev[id] ?? 0) + 1) };
+      return next;
     });
   }
-
-  function removeOne(cardId: number) {
-    setOthers((prev) => {
-      const cur = prev[cardId] ?? 0;
-      if (cur <= 0) return prev;
-      const next: OthersState = { ...prev, [cardId]: cur - 1 };
-      if (next[cardId] === 0) delete next[cardId];
+  function decOther(id: number) {
+    setSelOthers((prev) => {
+      const cur = prev[id] ?? 0;
+      const n = Math.max(0, cur - 1);
+      const next = { ...prev };
+      if (n === 0) delete next[id];
+      else next[id] = n;
       return next;
     });
   }
 
-  /* ---------- save ---------- */
+  // ----- save -----
   async function onSave() {
     try {
-      if (!userId) throw new Error("missing userId");
-      const cards: { cardId: number; count: number }[] = Object.entries(
-        others
-      )
-        .map(([k, v]) => ({ cardId: Number(k), count: v }))
-        .filter((x) => x.count > 0);
-
-      const body: SaveBody = {
-        userId,
-        name: deckName.trim() || "My Deck",
-        characters: [...chars],
-        cards,
-      };
-
-      const res = await fetchJSON<SaveResponse>("/api/deck", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
-
-      if ("error" in res) throw new Error(res.error);
-      alert("Saved!");
-      router.refresh();
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      alert(`save failed: ${msg}`);
+      if (!userId) {
+        alert("ไม่พบ userId (แนบ ?userId= ใน URL ก่อนนะ)");
+        return;
+      }
+      if (selChars.length === 0) {
+        alert("เลือกตัวละครอย่างน้อย 1 ตัวก่อนจ้า");
+        return;
+      }
+      const cards = Object.entries(selOthers).map(([id, count]) => ({
+        cardId: Number(id), // <<<<<< ใช้ id ตรง ๆ
+        count: Number(count),
+      }));
+      const body: SaveBody = { userId, name, characters: selChars, cards };
+      await postJSON("/api/deck", body);
+      alert("บันทึกเด็คเรียบร้อยแล้ว!");
+    } catch (e: unknown) {
+      alert(`Save ล้มเหลว: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
-  const canSave = chars.length <= 3 && totalOthers <= 20;
-
-  /* ============ UI ============ */
-
   return (
     <main className="min-h-screen p-6 flex flex-col gap-6">
-      <div className="flex items-center gap-3">
+      <header className="flex items-center gap-3">
         <input
-          className="px-3 py-2 rounded bg-neutral-900 border border-white/10 w-64"
-          value={deckName}
-          onChange={(e) => setDeckName(e.target.value)}
-          placeholder="My Deck"
+          className="px-3 py-2 rounded bg-neutral-800 flex-1"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Deck name"
         />
-        <span className="text-sm opacity-75">Chars {chars.length}/3</span>
-        <span className="text-sm opacity-75">Others {totalOthers}/20</span>
-        <button
-          className={`ml-auto px-4 py-2 rounded ${
-            canSave
-              ? "bg-emerald-600 hover:bg-emerald-500"
-              : "bg-neutral-700 opacity-60 cursor-not-allowed"
-          }`}
-          disabled={!canSave}
-          onClick={onSave}
-        >
+        <div className="text-sm opacity-70">Chars {selChars.length}/3</div>
+        <div className="text-sm opacity-70">Others {Object.values(selOthers).reduce((a, b) => a + b, 0)}/20</div>
+        <button className="px-4 py-2 rounded bg-emerald-600" onClick={onSave}>
           Save
         </button>
-      </div>
+      </header>
 
       {/* Characters */}
       <section>
-        <h2 className="font-semibold mb-2">Characters</h2>
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-          {characters.map((it) => {
-            const picked = chars.includes(it.cardId);
-            const src = cardImagePath(it.code, "character");
+        <div className="font-semibold mb-2">Characters</div>
+        <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-3">
+          {CHAR_CARDS.map((c) => {
+            const owned = inv?.chars?.[c.id] ?? 0;
+            const selected = selChars.includes(c.id);
             return (
               <button
-                key={it.cardId}
-                type="button"
-                onClick={() => toggleChar(it.cardId)}
-                className={[
-                  "relative h-32 rounded-2xl overflow-hidden text-left",
-                  "bg-neutral-900/60 border",
-                  picked
-                    ? "border-emerald-400 ring-2 ring-emerald-400/40"
-                    : "border-neutral-900 hover:border-neutral-800",
-                ].join(" ")}
-                aria-label={it.code}
+                key={c.id}
+                className={`relative rounded-xl border p-3 text-left ${
+                  selected ? "border-emerald-500" : "border-white/10"
+                } bg-black/20 hover:bg-black/30`}
+                onClick={() => toggleChar(c.id)}
               >
-                <Image
-                  src={src}
-                  alt={it.code}
-                  fill
-                  unoptimized
-                  className="object-cover"
-                  sizes="(max-width: 768px) 33vw, (max-width: 1024px) 20vw, 16vw"
-                />
-                <div className="absolute inset-0 bg-gradient-to-t from-black/55 via-black/0 to-black/10" />
-                <div className="absolute top-1 left-2 text-[10px] px-1.5 py-0.5 rounded bg-black/55">
-                  #{it.cardId}
+                <div className="absolute left-2 top-2">
+                  <Badge>#{c.id}</Badge>
                 </div>
-                <span className="absolute top-1 right-2 text-[10px] px-2 py-0.5 rounded-full bg-black/60">
-                  x{it.qty}
-                </span>
-                <div className="absolute left-2 bottom-1 text-xs font-semibold drop-shadow">
-                  {codeToPrettyName(it.code)}
+                <div className="absolute right-2 top-2">
+                  <Badge>owned {owned}</Badge>
                 </div>
+                <div className="h-28 relative mt-6">
+                  <Image
+                    fill
+                    alt={c.code}
+                    src={cardImg(c.code, c.art, "character")}
+                    className="object-cover rounded-lg"
+                    unoptimized
+                  />
+                </div>
+                <div className="mt-2 font-medium">{c.name || c.code.replaceAll("_", " ")}</div>
               </button>
             );
           })}
@@ -326,74 +212,66 @@ function DeckBuilderInner() {
 
       {/* Supports & Events */}
       <section>
-        <h2 className="font-semibold mb-2">Supports &amp; Events</h2>
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-          {othersPool.map((it) => {
-            const cur = others[it.cardId] ?? 0;
-            const left = it.qty - cur;
-            const src = cardImagePath(it.code, it.kind);
-            const disabled = !(totalOthers < 20 && left > 0);
-
+        <div className="font-semibold mb-2">Supports & Events</div>
+        <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-3">
+          {OTHER_CARDS.map((o) => {
+            const owned = inv?.others?.[o.id] ?? 0;
+            const picked = selOthers[o.id] ?? 0;
             return (
-              <button
-                key={it.cardId}
-                type="button"
-                onClick={() => addOne(it.cardId, it.qty)}
-                disabled={disabled}
-                className={[
-                  "relative h-28 rounded-2xl overflow-hidden border text-left",
-                  "bg-neutral-900/60",
-                  disabled
-                    ? "border-neutral-900 opacity-60 grayscale"
-                    : "border-neutral-900 hover:brightness-110",
-                ].join(" ")}
-                aria-label={`add ${it.code}`}
+              <div
+                key={`${o.kind}-${o.id}`}
+                className="relative rounded-xl border border-white/10 p-3 bg-black/20 hover:bg-black/30"
               >
-                <Image
-                  src={src}
-                  alt={it.code}
-                  fill
-                  unoptimized
-                  className="object-cover"
-                  sizes="(max-width: 768px) 33vw, (max-width: 1024px) 20vw, 16vw"
-                />
-                <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-black/0 to-black/20" />
-                <div className="absolute top-1 left-2 flex items-center gap-2">
-                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-black/55">
-                    #{it.cardId}
-                  </span>
-                  <span className="text-[10px] px-2 py-0.5 rounded bg-black/55">
-                    owned {it.qty}
-                  </span>
+                <div className="absolute left-2 top-2">
+                  <Badge>#{o.id}</Badge>
                 </div>
-                <div className="absolute left-2 bottom-2 text-xs font-semibold drop-shadow">
-                  {codeToPrettyName(it.code)}
+                <div className="absolute left-12 top-2">
+                  <Badge>owned {owned}</Badge>
                 </div>
-
-                {/* ปุ่มลบ (เฉพาะตอนเลือกแล้ว) */}
-                {cur > 0 && (
+                {/* ปุ่มลบมุมขวาบน */}
+                {picked > 0 && (
                   <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      removeOne(it.cardId);
-                    }}
-                    className="absolute top-1 right-1 w-7 h-7 grid place-items-center rounded-lg bg-black/60 hover:bg-black/70 border border-white/10"
-                    aria-label="remove one"
+                    className="absolute right-2 top-2 rounded bg-rose-600 px-1.5 py-0.5 text-[11px]"
+                    onClick={() => decOther(o.id)}
+                    title="ลบ 1 ใบ"
                   >
                     −
                   </button>
                 )}
 
-                {/* counter ที่เลือกแล้ว */}
-                <div className="absolute bottom-2 right-2 px-2 py-0.5 rounded-lg text-sm bg-black/60 border border-white/10">
-                  {cur}
+                <button
+                  className="block w-full text-left"
+                  onClick={() => addOther(o.id)}
+                  title="กดการ์ดเพื่อเพิ่ม 1 ใบ"
+                >
+                  <div className="h-28 relative">
+                    <Image
+                      fill
+                      alt={o.code}
+                      src={cardImg(o.code, o.art, o.kind)}
+                      className="object-cover rounded-lg"
+                      unoptimized
+                    />
+                  </div>
+                  <div className="mt-2 font-medium">{o.name || o.code.replaceAll("_", " ")}</div>
+                </button>
+
+                <div className="absolute right-2 bottom-2">
+                  <Badge>{picked}</Badge>
                 </div>
-              </button>
+              </div>
             );
           })}
         </div>
       </section>
     </main>
+  );
+}
+
+export default function DeckBuilderPage() {
+  return (
+    <Suspense fallback={<main className="min-h-screen p-6">Loading…</main>}>
+      <PageInner />
+    </Suspense>
   );
 }
