@@ -8,20 +8,63 @@ import cardsDataJson from "@/data/cards.json";
 
 /* ================= types ================= */
 type CharacterCard = {
-  char_id: number; code: string; name: string; element: string;
-  attack: number; hp: number; cost: number; abilityCode: string; art: string;
+  char_id: number;
+  code: string;
+  name: string;
+  element: string;
+  attack: number;
+  hp: number;
+  cost: number;
+  abilityCode: string;
+  art: string;
 };
-type SupportCard = { id: number; code: string; name: string; element: string; cost: number; text: string; art: string };
-type EventCard   = { id: number; code: string; name: string; element: string; cost: number; text: string; art: string };
-type CardsData   = { characters: CharacterCard[]; supports: SupportCard[]; events: EventCard[] };
-const cardsData  = cardsDataJson as CardsData;
+type SupportCard = {
+  id: number;
+  code: string;
+  name: string;
+  element: string;
+  cost: number;
+  text: string;
+  art: string;
+};
+type EventCard = {
+  id: number;
+  code: string;
+  name: string;
+  element: string;
+  cost: number;
+  text: string;
+  art: string;
+};
+type CardsData = {
+  characters: CharacterCard[];
+  supports: SupportCard[];
+  events: EventCard[];
+};
+const cardsData = cardsDataJson as CardsData;
 
-type Inventory = { userId: number; chars: Record<number, number>; others: Record<number, number> };
+type Inventory = {
+  userId: number;
+  chars: Record<number, number>;
+  others: Record<number, number>;
+};
 
-type SaveBody = { userId: number; name: string; characters: number[]; cards: { cardId: number; count: number }[] };
+type SaveBody = {
+  userId: number;
+  name: string;
+  characters: number[];
+  cards: { cardId: number; count: number }[];
+};
 
 type DeckResp =
-  | { ok: true; deck: { name: string; characters: number[]; cards: { cardId: number; count: number }[] } }
+  | {
+      ok: true;
+      deck: {
+        name: string;
+        characters: number[];
+        cards: { cardId: number; count: number }[];
+      };
+    }
   | { ok: true; deck?: undefined };
 
 type MeResp = { ok: boolean; user?: { id: number } };
@@ -40,7 +83,12 @@ async function getJSON<T>(url: string): Promise<T> {
   return (await r.json()) as T;
 }
 async function postJSON<T>(url: string, body: unknown): Promise<T> {
-  const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, cache: "no-store", body: JSON.stringify(body) });
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    cache: "no-store",
+    body: JSON.stringify(body),
+  });
   const txt = await r.text().catch(() => "");
   if (!r.ok) throw new Error(txt || r.statusText);
   return (txt ? JSON.parse(txt) : ({} as T)) as T;
@@ -51,9 +99,10 @@ function normalizeInventory(raw: unknown): Inventory {
   const empty: Inventory = { userId: 0, chars: {}, others: {} };
   if (!raw || typeof raw !== "object") return empty;
 
+  // กรณีส่งมารายการเดียว (row เดียว)
   const top = raw as Record<string, unknown>;
   const row: Record<string, unknown> =
-    (typeof top.row === "object" && top.row ? (top.row as Record<string, unknown>) : top);
+    typeof top.row === "object" && top.row ? (top.row as Record<string, unknown>) : top;
 
   const inv: Inventory = {
     userId: Number(row.user_id ?? 0) || Number((top.userId as number) ?? 0) || 0,
@@ -61,6 +110,7 @@ function normalizeInventory(raw: unknown): Inventory {
     others: {},
   };
 
+  // ถ้ามีทรงมาตรฐานแล้ว ก็ใช้เลย
   if (typeof row.chars === "object" && row.chars && !Array.isArray(row.chars)) {
     const c = row.chars as Record<string, unknown>;
     for (const [k, v] of Object.entries(c)) inv.chars[Number(k)] = Number(v ?? 0);
@@ -74,24 +124,51 @@ function normalizeInventory(raw: unknown): Inventory {
   for (const [k, v] of Object.entries(row)) {
     if (typeof v === "number" || typeof v === "string") {
       const mChar = /^char_(\d+)$/.exec(k);
-      if (mChar) { inv.chars[Number(mChar[1])] = Number(v); continue; }
+      if (mChar) {
+        inv.chars[Number(mChar[1])] = Number(v);
+        continue;
+      }
       const mCard = /^card_(\d+)$/.exec(k);
-      if (mCard) { inv.others[Number(mCard[1])] = Number(v); continue; }
+      if (mCard) {
+        inv.others[Number(mCard[1])] = Number(v);
+        continue;
+      }
     }
   }
   return inv;
 }
 
 /* ================ data from cards.json ================ */
-const CHAR_CARDS = cardsData.characters.map(c => ({ id: c.char_id, code: c.code, name: c.name, art: c.art }));
+const CHAR_CARDS = cardsData.characters.map((c) => ({
+  id: c.char_id,
+  code: c.code,
+  name: c.name,
+  art: c.art,
+}));
 const OTHER_CARDS = [
-  ...cardsData.supports.map(s => ({ id: s.id, code: s.code, name: s.name, art: s.art, kind: "support" as const })),
-  ...cardsData.events.map(e => ({ id: e.id, code: e.code, name: e.name, art: e.art, kind: "event"  as const })),
+  ...cardsData.supports.map((s) => ({
+    id: s.id,
+    code: s.code,
+    name: s.name,
+    art: s.art,
+    kind: "support" as const,
+  })),
+  ...cardsData.events.map((e) => ({
+    id: e.id,
+    code: e.code,
+    name: e.name,
+    art: e.art,
+    kind: "event" as const,
+  })),
 ];
 
 /* ================ UI bits ================ */
 function Badge({ children }: { children: React.ReactNode }) {
-  return <span className="px-1.5 py-0.5 rounded text-[11px] bg-black/70 text-white pointer-events-none">{children}</span>;
+  return (
+    <span className="px-1.5 py-0.5 rounded text-[11px] bg-black/70 text-white pointer-events-none">
+      {children}
+    </span>
+  );
 }
 function PortraitCardImage({ src, alt }: { src: string; alt: string }) {
   return (
@@ -111,20 +188,26 @@ function PageInner() {
   const [inv, setInv] = useState<Inventory | null>(null);
   const [selChars, setSelChars] = useState<number[]>([]);
   const [selOthers, setSelOthers] = useState<Record<number, number>>({});
-  const othersTotal = useMemo(() => Object.values(selOthers).reduce((a, b) => a + b, 0), [selOthers]);
+  const othersTotal = useMemo(
+    () => Object.values(selOthers).reduce((a, b) => a + b, 0),
+    [selOthers]
+  );
 
   // 0) if ไม่มี ?userId= ให้ลอง /api/me
   useEffect(() => {
-    if (qsUserId) return;
+    if (qsUserId) return; // ระบุมาแล้ว
     (async () => {
       try {
         const me = await getJSON<MeResp>("/api/me");
         const uid = Number(me.user?.id ?? 0);
         if (uid) setUserId(uid);
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     })();
   }, [qsUserId]);
 
+  // sync ถ้ามี ?userId=
   useEffect(() => {
     if (qsUserId && qsUserId !== userId) setUserId(qsUserId);
   }, [qsUserId, userId]);
@@ -148,6 +231,7 @@ function PageInner() {
           for (const it of deckResp.deck.cards ?? []) rec[it.cardId] = it.count;
           setSelOthers(rec);
         } else {
+          // ไม่มีเด็ค → เคลียร์ค่าที่เลือกไว้
           setSelChars([]);
           setSelOthers({});
         }
@@ -158,7 +242,13 @@ function PageInner() {
   }, [userId]);
 
   function toggleChar(id: number) {
-    setSelChars((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : prev.length >= 3 ? prev : [...prev, id]));
+    setSelChars((prev) =>
+      prev.includes(id)
+        ? prev.filter((x) => x !== id)
+        : prev.length >= 3
+        ? prev
+        : [...prev, id]
+    );
   }
   function addOther(id: number) {
     setSelOthers((prev) => ({ ...prev, [id]: Math.min(20, (prev[id] ?? 0) + 1) }));
@@ -173,13 +263,19 @@ function PageInner() {
     });
   }
   async function onSave() {
-    if (!userId) return alert("ไม่พบ userId (แนบ ?userId= ใน URL หรือ login เพื่อให้ระบบหาให้อัตโนมัติ)");
+    if (!userId)
+      return alert(
+        "ไม่พบ userId (แนบ ?userId= ใน URL หรือ login เพื่อให้ระบบหาให้อัตโนมัติ)"
+      );
     if (selChars.length === 0) return alert("เลือกตัวละครอย่างน้อย 1 ตัวก่อนนะ");
     const body: SaveBody = {
       userId,
       name,
       characters: selChars,
-      cards: Object.entries(selOthers).map(([id, count]) => ({ cardId: Number(id), count: Number(count) })),
+      cards: Object.entries(selOthers).map(([id, count]) => ({
+        cardId: Number(id),
+        count: Number(count),
+      })),
     };
     try {
       await postJSON("/api/deck", body);
@@ -192,10 +288,17 @@ function PageInner() {
   return (
     <main className="min-h-screen p-6 flex flex-col gap-6">
       <header className="flex items-center gap-3">
-        <input className="px-3 py-2 rounded bg-neutral-800 flex-1" value={name} onChange={(e)=>setName(e.target.value)} placeholder="Deck name" />
+        <input
+          className="px-3 py-2 rounded bg-neutral-800 flex-1"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Deck name"
+        />
         <div className="text-sm opacity-70">Chars {selChars.length}/3</div>
         <div className="text-sm opacity-70">Others {othersTotal}/20</div>
-        <button className="px-4 py-2 rounded bg-emerald-600" onClick={onSave}>Save</button>
+        <button className="px-4 py-2 rounded bg-emerald-600" onClick={onSave}>
+          Save
+        </button>
       </header>
 
       {/* Characters */}
@@ -203,25 +306,38 @@ function PageInner() {
         <div className="font-semibold mb-2">Characters</div>
         <div className="flex flex-wrap gap-3">
           {CHAR_CARDS.map((c) => {
-            const owned = inv?.chars?.[c.id] ?? 0;              // owned จาก inventory
-            const selected = selChars.includes(c.id);           // พรีฟิลจาก deck
+            const owned = inv?.chars?.[c.id] ?? 0; // owned จาก inventory
+            const selected = selChars.includes(c.id); // พรีฟิลจาก deck
             return (
               <button
                 key={c.id}
-                className={`relative border p-3 text-left rounded-xl ${selected ? "border-emerald-500" : "border-white/10"} bg-black/20 hover:bg-black/30`}
+                className={`relative border p-3 text-left rounded-xl ${
+                  selected ? "border-emerald-500" : "border-white/10"
+                } bg-black/20 hover:bg-black/30`}
                 style={{ width: CARD_W }}
                 onClick={() => toggleChar(c.id)}
                 title="กดเพื่อเลือก/เอาออก"
               >
-                <div className="absolute left-2 top-2 z-10"><Badge>#{c.id}</Badge></div>
-                {/* แสดงเฉพาะเมื่อมีการ์ด */}
-                {owned > 0 && (
-                  <div className="absolute right-2 top-2 z-10"><Badge>owned {owned}</Badge></div>
-                )}
-                <div className="mt-3">
-                  <PortraitCardImage src={cardImg(c.art, "character")} alt={c.code} />
+                <div className="absolute left-2 top-2 z-10">
+                  <Badge>#{c.id}</Badge>
                 </div>
-                <div className="mt-2 font-medium truncate">{c.name || c.code.replaceAll("_", " ")}</div>
+
+                {/* แสดง owned เฉพาะ > 0 */}
+                {owned > 0 && (
+                  <div className="absolute right-2 top-2 z-10">
+                    <Badge>owned {owned}</Badge>
+                  </div>
+                )}
+
+                <div className="mt-3">
+                  <PortraitCardImage
+                    src={cardImg(c.art, "character")}
+                    alt={c.code}
+                  />
+                </div>
+                <div className="mt-2 font-medium truncate">
+                  {c.name || c.code.replaceAll("_", " ")}
+                </div>
               </button>
             );
           })}
@@ -233,18 +349,23 @@ function PageInner() {
         <div className="font-semibold mb-2">Supports & Events</div>
         <div className="flex flex-wrap gap-3">
           {OTHER_CARDS.map((o) => {
-            const owned = inv?.others?.[o.id] ?? 0;           // owned จาก inventory
-            const picked = selOthers[o.id] ?? 0;              // พรีฟิลจาก deck
+            const owned = inv?.others?.[o.id] ?? 0; // owned จาก inventory
+            const picked = selOthers[o.id] ?? 0; // พรีฟิลจาก deck
             return (
               <div
                 key={`${o.kind}-${o.id}`}
                 className="relative border border-white/10 p-3 rounded-xl bg-black/20 hover:bg-black/30"
                 style={{ width: CARD_W }}
               >
-                <div className="absolute left-2 top-2 z-20"><Badge>#{o.id}</Badge></div>
-                {/* แสดง owned เฉพาะเมื่อมีการ์ด */}
+                <div className="absolute left-2 top-2 z-20">
+                  <Badge>#{o.id}</Badge>
+                </div>
+
+                {/* แสดง owned เฉพาะ > 0 */}
                 {owned > 0 && (
-                  <div className="absolute left-12 top-2 z-20"><Badge>owned {owned}</Badge></div>
+                  <div className="absolute left-12 top-2 z-20">
+                    <Badge>owned {owned}</Badge>
+                  </div>
                 )}
 
                 {picked > 0 && (
@@ -257,14 +378,22 @@ function PageInner() {
                   </button>
                 )}
 
-                <button className="block w-full text-left relative z-0" onClick={() => addOther(o.id)} title="กดการ์ดเพื่อเพิ่ม 1 ใบ">
+                <button
+                  className="block w-full text-left relative z-0"
+                  onClick={() => addOther(o.id)}
+                  title="กดการ์ดเพื่อเพิ่ม 1 ใบ"
+                >
                   <PortraitCardImage src={cardImg(o.art, o.kind)} alt={o.code} />
-                  <div className="mt-2 font-medium truncate">{o.name || o.code.replaceAll("_", " ")}</div>
+                  <div className="mt-2 font-medium truncate">
+                    {o.name || o.code.replaceAll("_", " ")}
+                  </div>
                 </button>
 
-                {/* แสดงจำนวนที่เลือกเฉพาะเมื่อ > 0 */}
+                {/* แสดง picked เฉพาะ > 0 */}
                 {picked > 0 && (
-                  <div className="absolute right-2 bottom-2 z-20"><Badge>{picked}</Badge></div>
+                  <div className="absolute right-2 bottom-2 z-20">
+                    <Badge>{picked}</Badge>
+                  </div>
                 )}
               </div>
             );
