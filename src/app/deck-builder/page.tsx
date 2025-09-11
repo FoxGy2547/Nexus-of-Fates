@@ -3,6 +3,7 @@
 import { Suspense, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 import { useSearchParams, useRouter } from "next/navigation";
+import rawCards from "@/data/cards.json";
 
 /* ============ types ============ */
 
@@ -25,6 +26,13 @@ type SaveBody = {
 type SaveResponse = { ok: true; deckId: number } | { error: string };
 type MeResponse = { userId: number } | { error: string };
 type OthersState = Record<number, number>;
+
+type CodeArt = { code: string; art?: string };
+type CardsJson = {
+  characters?: unknown;
+  supports?: unknown;
+  events?: unknown;
+};
 
 /* ============ helpers ============ */
 
@@ -51,14 +59,52 @@ function codeToPrettyName(code: string): string {
     .join(" ");
 }
 
-/** คืน path รูปใน /public ตามชนิดการ์ด (เข้ารหัสกันช่องว่าง/อักขระพิเศษ) */
+/** แปลง unknown ให้เป็นลิสต์ {code, art?} อย่างปลอดภัยโดยไม่ใช้ any */
+function parseCodeArtArray(u: unknown): CodeArt[] {
+  if (!Array.isArray(u)) return [];
+  const out: CodeArt[] = [];
+  for (const v of u) {
+    if (typeof v === "object" && v !== null) {
+      const o = v as Record<string, unknown>;
+      let code: string | null = null;
+      // เผื่อบางไฟล์ไม่มี code แต่มี name → แปลงเป็น CODE ด้วยชื่อ
+      if (typeof o.code === "string") code = o.code;
+      else if (typeof o.name === "string")
+        code = o.name.replace(/\s+/g, "_").toUpperCase();
+
+      if (code) {
+        const art =
+          typeof o.art === "string" && o.art.trim().length > 0
+            ? o.art
+            : undefined;
+        out.push({ code, art });
+      }
+    }
+  }
+  return out;
+}
+
+/** หาไฟล์รูปจาก cards.json ด้วย code */
+function getArtFromCardsJson(code: string): string | null {
+  const data = rawCards as unknown as CardsJson;
+  const pools: CodeArt[] = [
+    ...parseCodeArtArray(data.characters),
+    ...parseCodeArtArray(data.supports),
+    ...parseCodeArtArray(data.events),
+  ];
+  const hit = pools.find(
+    (x) => x.code.toUpperCase() === code.toUpperCase() && x.art
+  );
+  return hit?.art ?? null;
+}
+
+/** สร้าง path รูป (ใช้ art จาก cards.json ถ้ามี, ไม่มีก็ fallback เป็นชื่อจาก code) */
 function cardImagePath(code: string, kind: Kind): string {
-  const pretty = codeToPrettyName(code); // e.g. "Blaze Knight"
+  const art = getArtFromCardsJson(code);
+  const file = art ?? `${codeToPrettyName(code)}.png`;
   const raw =
-    kind === "character"
-      ? `/cards/char_cards/${pretty}.png`
-      : `/cards/${pretty}.png`;
-  return encodeURI(raw); // -> /cards/char_cards/Blaze%20Knight.png
+    kind === "character" ? `/char_cards/${file}` : `/cards/${file}`;
+  return encodeURI(raw); // กันช่องว่าง/อักขระพิเศษ
 }
 
 /* ============ Page (wrap Suspense) ============ */
