@@ -1,4 +1,3 @@
-// src/app/api/game/route.ts
 import { NextResponse } from "next/server";
 import cardsDataJson from "@/data/cards.json";
 import { query, queryOne } from "@/lib/db";
@@ -43,12 +42,9 @@ type CardsData = {
 };
 const cardsData = cardsDataJson as CardsData;
 
-/* ========================= DB flag (เปิดเมื่อมี ENV) ========================= */
+/* ========================= DB flag ========================= */
 const DB_ON = Boolean(
-  process.env.DATABASE_URL ||
-    process.env.DB_HOST ||
-    process.env.PGHOST ||
-    process.env.DB_URL
+  process.env.DATABASE_URL || process.env.DB_HOST || process.env.PGHOST || process.env.DB_URL,
 );
 
 /* ========================= Types & Room ========================= */
@@ -85,7 +81,7 @@ const gs = globalThis as GlobalWithStore;
 if (!gs.__NOF_STORE__) gs.__NOF_STORE__ = new Map();
 
 /* ========================= Persistence ========================= */
-type RoomRow = QueryResultRow & { id: string; version: number; state_json: any };
+type RoomRow = QueryResultRow & { id: string; version: number; state_json: unknown };
 
 function freshRoom(id: string): RoomState {
   return {
@@ -115,7 +111,7 @@ async function loadRoom(roomId: string): Promise<{ state: RoomState; version: nu
     try {
       const row = await queryOne<RoomRow>(
         "select id, version, state_json from public.rooms where id = $1 limit 1",
-        [id]
+        [id],
       );
       if (row) {
         return { state: row.state_json as RoomState, version: Number(row.version) };
@@ -125,11 +121,11 @@ async function loadRoom(roomId: string): Promise<{ state: RoomState; version: nu
         `insert into public.rooms (id, version, state_json)
          values ($1, 1, $2)
          on conflict (id) do nothing`,
-        [id, state]
+        [id, state],
       );
       return { state, version: 1 };
     } catch {
-      // ตกมาใช้ local ถ้า DB ล้ม
+      // fallback local
     }
   }
 
@@ -144,31 +140,30 @@ async function saveRoom(
   roomId: string,
   nextState: RoomState,
   prevVersion: number,
-  retry = 0
+  retry = 0,
 ): Promise<number> {
   const id = roomId.toUpperCase();
 
   if (DB_ON) {
     try {
-      // optimistic concurrency
       const updated = await query<{ version: number }>(
         `update public.rooms
            set state_json = $2, version = version + 1, updated_at = now()
          where id = $1 and version = $3
          returning version`,
-        [id, nextState, prevVersion]
+        [id, nextState, prevVersion],
       );
       if (updated.length > 0) return Number(updated[0].version);
 
       if (retry >= 2) throw new Error("Conflict: room updated concurrently");
       const cur = await queryOne<{ version: number }>(
         `select version from public.rooms where id = $1`,
-        [id]
+        [id],
       );
       const curVer = Number(cur?.version ?? 1);
       return saveRoom(id, nextState, curVer, retry + 1);
     } catch {
-      // ตกมาใช้ local ถ้า DB ล้ม
+      // fallback local
     }
   }
 
@@ -260,7 +255,7 @@ type UserRow = QueryResultRow & { id: number; username?: string | null };
 
 async function qOne<T extends QueryResultRow>(
   sql: string,
-  params: unknown[] = []
+  params: unknown[] = [],
 ): Promise<T | null> {
   if (!DB_ON) return null;
   try {
@@ -273,31 +268,28 @@ async function qOne<T extends QueryResultRow>(
 
 async function findUserRowByAny(
   key: string,
-  display?: string | null
+  display?: string | null,
 ): Promise<UserRow | null> {
   if (!DB_ON) return null;
 
-  // discord_id เป็นตัวเลขยาว?
   if (/^\d{6,}$/.test(key)) {
     const u = await qOne<UserRow>(
       "select id, username from public.users where discord_id = $1 limit 1",
-      [key]
+      [key],
     );
     if (u) return u;
   }
-  // อีเมล?
   if (/@/.test(key)) {
     const u = await qOne<UserRow>(
       "select id, username from public.users where email = $1 limit 1",
-      [key]
+      [key],
     );
     if (u) return u;
   }
-  // username
   const name = display ?? key;
   const u = await qOne<UserRow>(
     "select id, username from public.users where username = $1 limit 1",
-    [name]
+    [name],
   );
   return u ?? null;
 }
@@ -312,11 +304,11 @@ type DeckRow = QueryResultRow & {
 } & { [K in `card${number}`]?: number | null };
 
 async function loadDeckFromDB(
-  userId: number
+  userId: number,
 ): Promise<{ chars: string[]; deck: string[] } | null> {
   const row = await qOne<DeckRow>(
     "select * from public.decks where user_id = $1 limit 1",
-    [userId]
+    [userId],
   );
   if (!row) return null;
 
@@ -334,7 +326,8 @@ async function loadDeckFromDB(
 
   const deck: string[] = [];
   for (let i = 1; i <= 20; i++) {
-    const val = (row as any)[`card${i}`] as number | null | undefined;
+    const key = `card${i}` as keyof DeckRow;
+    const val = row[key] as number | null | undefined;
     if (val == null) continue;
     const id = Number(val);
     const code = supById.get(id) ?? evtById.get(id) ?? null;
@@ -433,7 +426,7 @@ function stateForClient(room: RoomState, currentUserId?: string) {
 
 async function userHasDeck(
   room: RoomState,
-  side: Side
+  side: Side,
 ): Promise<{ has: boolean; display?: string | null }> {
   if (!DB_ON) return { has: true, display: room.players[side]?.name ?? null };
   const p = room.players[side];
@@ -442,7 +435,7 @@ async function userHasDeck(
   if (!u) return { has: false, display: p.name ?? null };
   const d = await qOne<{ id: number }>(
     "select id from public.decks where user_id = $1 limit 1",
-    [u.id]
+    [u.id],
   );
   return { has: !!d, display: p.name ?? null };
 }
@@ -566,7 +559,7 @@ function combat(
   userId: string,
   attackerIndex: number,
   targetIndex: number | null,
-  mode: "basic" | "skill" | "ult"
+  mode: "basic" | "skill" | "ult",
 ) {
   const s = sideOf(room, userId);
   if (!s) throw new Error("Not in room");
@@ -679,7 +672,7 @@ export async function POST(req: Request) {
       });
     }
 
-    // ✅ ไม่บังคับมี user
+    // ไม่บังคับมี user
     if (action === "createRoom") {
       const id = roomId;
       const { state, version } = await loadRoom(id);
@@ -688,7 +681,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, roomId: id });
     }
 
-    // ✅ ไม่บังคับมี user
     if (action === "joinRoom") {
       const id = roomId;
       const { state, version } = await loadRoom(id);
