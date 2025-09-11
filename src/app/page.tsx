@@ -8,7 +8,6 @@ import Image from "next/image";
 
 /* ================= helpers ================= */
 
-/** POST ไป /api/game พร้อมจัดการ error message ให้อ่านง่าย */
 async function post<T>(body: unknown): Promise<T> {
   const res = await fetch("/api/game", {
     method: "POST",
@@ -19,12 +18,7 @@ async function post<T>(body: unknown): Promise<T> {
 
   const rawText = await res.text().catch(() => "");
   let json: unknown = null;
-  try {
-    json = rawText ? JSON.parse(rawText) : null;
-  } catch {
-    /* ignore parse error */
-  }
-
+  try { json = rawText ? JSON.parse(rawText) : null; } catch {}
   if (!res.ok) {
     const msg =
       ((json as { error?: string } | null)?.error) ??
@@ -34,31 +28,23 @@ async function post<T>(body: unknown): Promise<T> {
   return (json as T) ?? ({} as T);
 }
 
-/** สุ่มไอดีแบบ type-safe (ถ้ามี crypto.randomUUID ก็ใช้ ไม่งั้น fallback) */
 function safeRandomId(): string {
   if (typeof globalThis !== "undefined" && "crypto" in globalThis) {
     const c = (globalThis as { crypto?: Crypto }).crypto;
-    if (c && typeof c.randomUUID === "function") {
-      return c.randomUUID();
-    }
+    if (c && typeof c.randomUUID === "function") return c.randomUUID();
   }
   return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-/** userId เสถียรทั้งแอป (auth > email > guestId); การันตีคืนค่า string เสมอ */
 function stableUserId(session: Session | null | undefined): string {
   if (typeof window === "undefined") return "ssr";
-
   const authId =
     (session?.user as { id?: string | null } | undefined)?.id ??
-    session?.user?.email ??
-    null;
+    session?.user?.email ?? null;
   if (authId) return String(authId);
-
   const key = "NOF_guestId";
   const existing = localStorage.getItem(key);
   if (existing) return existing;
-
   const rnd = safeRandomId();
   localStorage.setItem(key, rnd);
   return rnd;
@@ -89,50 +75,29 @@ export default function Home() {
   const [createCode, setCreateCode] = useState<string>(randRoom());
   const [joinCode, setJoinCode] = useState<string>("");
 
-  // user id ที่ใช้กับ Deck Builder (เป็น id จากตาราง users ใน DB)
-  // ใส่ค่าเริ่มต้นเป็น 6 ตามข้อมูลที่มีตอนนี้ (2,4,6)
-  const [invUserId, setInvUserId] = useState<number>(6);
-
   const user: PlayerInfo = useMemo(() => {
     const id = stableUserId(session);
-    return {
-      userId: id,
-      name: session?.user?.name ?? "Player",
-      avatar: session?.user?.image ?? null,
-    };
+    return { userId: id, name: session?.user?.name ?? "Player", avatar: session?.user?.image ?? null };
   }, [session]);
 
   async function onCreate() {
     try {
       const roomId = (createCode || randRoom()).toUpperCase();
-      const res = await post<CreateJoinResponse>({
-        action: "createRoom",
-        roomId,
-        user,
-      });
+      const res = await post<CreateJoinResponse>({ action: "createRoom", roomId, user });
       router.push(`/play/${(res.roomId || roomId).toUpperCase()}`);
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : "unknown";
-      alert(`Create failed: ${msg}`);
+      alert(`Create failed: ${e instanceof Error ? e.message : "unknown"}`);
     }
   }
 
   async function onJoin() {
     try {
       const roomId = (joinCode || "").trim().toUpperCase();
-      if (!roomId) {
-        alert("กรอกรหัสห้องก่อนนะ");
-        return;
-      }
-      const res = await post<CreateJoinResponse>({
-        action: "joinRoom",
-        roomId,
-        user,
-      });
+      if (!roomId) return alert("กรอกรหัสห้องก่อนนะ");
+      const res = await post<CreateJoinResponse>({ action: "joinRoom", roomId, user });
       router.push(`/play/${(res.roomId || roomId).toUpperCase()}`);
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : "unknown";
-      alert(`Join failed: ${msg}`);
+      alert(`Join failed: ${e instanceof Error ? e.message : "unknown"}`);
     }
   }
 
@@ -154,18 +119,12 @@ export default function Home() {
               />
             )}
             <span>{session?.user?.name ?? "Discord User"}</span>
-            <button
-              className="px-3 py-1 rounded bg-red-600"
-              onClick={() => signOut()}
-            >
+            <button className="px-3 py-1 rounded bg-red-600" onClick={() => signOut()}>
               Logout
             </button>
           </>
         ) : (
-          <button
-            className="px-3 py-1 rounded bg-indigo-600"
-            onClick={() => signIn("discord")}
-          >
+          <button className="px-3 py-1 rounded bg-indigo-600" onClick={() => signIn("discord")}>
             Login with Discord
           </button>
         )}
@@ -186,9 +145,7 @@ export default function Home() {
               Create
             </button>
           </div>
-          <p className="mt-2 text-xs opacity-70">
-            โฮสต์จะถูกกำหนดเป็นฝั่ง p1 โดยอัตโนมัติ
-          </p>
+          <p className="mt-2 text-xs opacity-70">โฮสต์จะถูกกำหนดเป็นฝั่ง p1 โดยอัตโนมัติ</p>
         </div>
 
         <div className="rounded-xl border border-white/10 p-4 bg-black/20">
@@ -211,34 +168,19 @@ export default function Home() {
         </div>
       </section>
 
-      {/* deck builder entry */}
+      {/* deck builder entry — ใช้คลังการ์ดของผู้ที่ล็อกอินอัตโนมัติ */}
       <section className="rounded-xl border border-white/10 p-4 bg-black/20">
         <div className="flex flex-wrap items-center gap-3">
           <div className="font-semibold">Deck Builder</div>
           <span className="text-sm opacity-70">
-            จัดเด็ค: เลือกตัวละคร ≤ 3 ใบ และการ์ดเสริม/อีเวนต์รวม ≤ 20 ใบ
+            ใช้คลังการ์ดของบัญชีที่กำลังล็อกอินอยู่ (ไอดีใครไอดีมัน)
           </span>
-
-          {/* เลือก user id (inventory owner) แบบมินิมอล */}
-          <div className="ml-auto flex items-center gap-2">
-            <label className="text-sm opacity-80">Inventory user:</label>
-            <div className="inline-flex rounded-lg overflow-hidden border border-white/10">
-              {[2, 4, 6].map((id) => (
-                <button
-                  key={id}
-                  onClick={() => setInvUserId(id)}
-                  className={[
-                    "px-3 py-1.5 text-sm",
-                    invUserId === id ? "bg-purple-600" : "bg-neutral-800 hover:bg-neutral-700",
-                  ].join(" ")}
-                >
-                  #{id}
-                </button>
-              ))}
-            </div>
+          <div className="ml-auto">
             <button
-              className="px-4 py-2 rounded bg-purple-600 hover:bg-purple-500"
+              className="px-4 py-2 rounded bg-purple-600 hover:bg-purple-500 disabled:opacity-50"
               onClick={() => router.push("/deck-builder")}
+              disabled={status !== "authenticated"}
+              title={status !== "authenticated" ? "ล็อกอินก่อนนะ" : ""}
             >
               Open Deck Builder
             </button>
