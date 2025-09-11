@@ -32,7 +32,7 @@ const CARD_RATIO = "aspect-[2/3]";
 
 /* ============ helpers ============ */
 function cardImg(art: string, kind: "character" | "support" | "event"): string {
-  return encodeURI(kind === "character" ? `/cards/char_cards/${art}` : `/cards/${art}`);
+  return encodeURI(kind === "character" ? `/char_cards/${art}` : `/cards/${art}`);
 }
 async function getJSON<T>(url: string): Promise<T> {
   const r = await fetch(url, { cache: "no-store" });
