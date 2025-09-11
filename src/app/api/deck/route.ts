@@ -72,14 +72,15 @@ export async function GET(req: Request) {
 
     // เตรียมรายชื่อคอลัมน์ card1..card20
     const otherCols = Array.from({ length: 20 }, (_, i) => `card${i + 1}`).join(",");
+    const columns = `id,name,card_char1,card_char2,card_char3,${otherCols}`;
 
     const sel = await supa
       .from("decks")
-      .select(`id,name,card_char1,card_char2,card_char3,${otherCols}`)
+      .select(columns)
       .eq("user_id", userId)
       .eq("is_active", true)
       .limit(1)
-      .maybeSingle();
+      .maybeSingle<DeckRow>();
 
     if (sel.error) {
       return NextResponse.json({ error: sel.error.message }, { status: 400 });
@@ -97,7 +98,7 @@ export async function GET(req: Request) {
     }
 
     // แปลงข้อมูลจาก DB แบบ type-safe
-    const row = sel.data as unknown as DeckRow;
+    const row = sel.data; // DeckRow
 
     const characters = [row.card_char1, row.card_char2, row.card_char3]
       .map((v) => toInt(v))
@@ -105,12 +106,13 @@ export async function GET(req: Request) {
 
     // นับใบอื่น ๆ 101..103 จาก card1..card20
     const counts: Record<number, number> = { 101: 0, 102: 0, 103: 0 };
+    const anyRow = row as Record<string, unknown>;
     for (let i = 1; i <= 20; i++) {
-      const v = toInt(row[`card${i}`]);
+      const v = toInt(anyRow[`card${i}`]);
       if (v === 101 || v === 102 || v === 103) counts[v] = (counts[v] ?? 0) + 1;
     }
-    const cards = (Object.keys(counts) as unknown as number[])
-      .map((id) => ({ cardId: id, count: counts[id] ?? 0 }))
+    const cards = Object.entries(counts)
+      .map(([id, count]) => ({ cardId: Number(id), count }))
       .filter((c) => c.count > 0);
 
     return NextResponse.json({
