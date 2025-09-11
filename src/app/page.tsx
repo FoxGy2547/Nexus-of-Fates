@@ -236,10 +236,9 @@ export default function Home() {
                 </button>
               ))}
             </div>
-
             <button
               className="px-4 py-2 rounded bg-purple-600 hover:bg-purple-500"
-              onClick={() => router.push(`/deck-builder?userId=${invUserId}`)}
+              onClick={() => router.push("/deck-builder")}
             >
               Open Deck Builder
             </button>
