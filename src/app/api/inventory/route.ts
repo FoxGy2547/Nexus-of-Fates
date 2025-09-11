@@ -5,6 +5,16 @@ import { supa } from "@/lib/supabase";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/* ---------- types & guards ---------- */
+type Kind = "character" | "support" | "event";
+type InvRow = { card_id: number; qty: number };
+type CardRow = { id: number; code: string; kind: unknown };
+
+function isKind(x: unknown): x is Kind {
+  return x === "character" || x === "support" || x === "event";
+}
+
+/* ---------- handler ---------- */
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
@@ -21,7 +31,8 @@ export async function GET(req: Request) {
 
     if (inv.error) throw inv.error;
 
-    const ids = (inv.data ?? []).map((r) => Number(r.card_id));
+    const invRows = (inv.data ?? []) as InvRow[];
+    const ids = invRows.map((r) => Number(r.card_id));
     if (ids.length === 0) return NextResponse.json({ items: [] });
 
     // 2) card meta
@@ -32,17 +43,20 @@ export async function GET(req: Request) {
 
     if (cards.error) throw cards.error;
 
-    const meta = new Map<number, { code: string; kind: "character" | "support" | "event" }>();
-    (cards.data ?? []).forEach((c) => {
-      meta.set(Number(c.id), { code: String(c.code), kind: c.kind as any });
-    });
+    const cardRows = (cards.data ?? []) as CardRow[];
 
-    const items = (inv.data ?? []).map((r) => {
+    const meta = new Map<number, { code: string; kind: Kind }>();
+    for (const c of cardRows) {
+      const kind: Kind = isKind(c.kind) ? c.kind : "support"; // default กันชน
+      meta.set(Number(c.id), { code: String(c.code), kind });
+    }
+
+    const items = invRows.map((r) => {
       const m = meta.get(Number(r.card_id));
       return {
         cardId: Number(r.card_id),
         code: m?.code ?? `ID_${r.card_id}`,
-        kind: (m?.kind ?? "support") as "character" | "support" | "event",
+        kind: (m?.kind ?? "support") as Kind,
         qty: Number(r.qty),
       };
     });
