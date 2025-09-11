@@ -1,240 +1,358 @@
-// src/app/deck-builder/page.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Image from "next/image";
+import { useSearchParams, useRouter } from "next/navigation";
+import cardsData from "@/data/cards.json";
 
 /* ============ types ============ */
-type Item = {
-  cardId: number;
-  code: string;
-  kind: "character" | "support" | "event";
-  qty: number;
+
+type Kind = "character" | "support" | "event";
+
+type InventoryItem = {
+  cardId: number; // 1..12 (characters) หรือ 101..103 (supports/events)
+  code: string;   // จาก cards.json เช่น BLAZING_SIGIL
+  kind: Kind;
+  qty: number;    // จำนวนที่ผู้เล่นมี
 };
 
+type InventoryResponse = { items: InventoryItem[] } | { error: string };
+
+type SaveBody = {
+  userId: number;
+  name: string;
+  characters: number[]; // id 1..12
+  cards: { cardId: number; count: number }[]; // ใช้ 101..103
+};
+
+type SaveResponse = { ok: true; deckId: number } | { error: string };
+
+type MeResponse = { userId: number } | { error: string };
+
+type OthersState = Record<number, number>;
+
 /* ============ helpers ============ */
-function isErrPayload(x: unknown): x is { error?: string; message?: string } {
-  return !!x && typeof x === "object" && ("error" in (x as Record<string, unknown>) || "message" in (x as Record<string, unknown>));
-}
 
-async function fetchJSON<T = unknown>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, { cache: "no-store", ...init });
-  const text = await res.text().catch(() => "");
-
-  let data: unknown = null;
-  if (text) {
-    try {
-      data = JSON.parse(text) as unknown;
-    } catch {
-      throw new Error(`Bad JSON from ${url}: ${text.slice(0, 120)}`);
-    }
-  }
-
+async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(url, init);
+  const text = await res.text();
+  const json: unknown = text ? JSON.parse(text) : {};
   if (!res.ok) {
     const msg =
-      (isErrPayload(data) && (data.error || data.message)) ||
-      text ||
-      res.statusText ||
-      "Request failed";
+      (json as { error?: string }).error ?? res.statusText ?? "Request failed";
     throw new Error(msg);
   }
+  return json as T;
+}
 
-  return (data as T) ?? ({} as T);
+/** "WAVECALLER" -> "Wavecaller", "WINDBLADE_DUELIST" -> "Windblade Duelist" */
+function codeToPrettyName(code: string): string {
+  const parts = code.includes("_") ? code.split("_") : [code];
+  return parts
+    .map((p) => {
+      const s = p.toLowerCase();
+      return s.charAt(0).toUpperCase() + s.slice(1);
+    })
+    .join(" ");
+}
+
+/** คืน path รูปใน /public ตามชนิดการ์ด */
+function cardImagePath(code: string, kind: Kind): string {
+  const pretty = codeToPrettyName(code);
+  return kind === "character"
+    ? `/cards/char_cards/${pretty}.png`
+    : `/cards/${pretty}.png`;
+}
+
+const OTHER_ID_BASE = 100; // 101..103
+type Slot = 1 | 2 | 3;
+function slotToOtherId(slot: Slot): number {
+  return OTHER_ID_BASE + slot; // 101/102/103
 }
 
 /* ============ page ============ */
+
 export default function DeckBuilderPage() {
-  const [meId, setMeId] = useState<number | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [items, setItems] = useState<Item[]>([]);
-  const [name, setName] = useState("My Deck");
+  const params = useSearchParams();
+  const router = useRouter();
 
-  // selections
-  const [chars, setChars] = useState<number[]>([]);
-  const [others, setOthers] = useState<Record<number, number>>({}); // cardId -> count
-  const totalOthers = useMemo(() => Object.values(others).reduce((a, b) => a + b, 0), [others]);
+  // user ที่ใช้ inventory: query ?userId=… > /api/me
+  const [userId, setUserId] = useState<number | null>(null);
 
-  // load me -> inventory
+  // สินค้าทั้งหมดที่ user มี (แยกไว้สองชุดเพื่อ UI)
+  const [inv, setInv] = useState<InventoryItem[]>([]);
+  const characters = useMemo(
+    () => inv.filter((x) => x.kind === "character"),
+    [inv]
+  );
+  const othersPool = useMemo(
+    () => inv.filter((x) => x.kind !== "character"),
+    [inv]
+  );
+
+  // ตัวเลือกปัจจุบัน
+  const [deckName, setDeckName] = useState<string>("My Deck");
+  const [chars, setChars] = useState<number[]>([]); // เลือกตัวละคร (id 1..12)
+  const [others, setOthers] = useState<OthersState>({}); // {101:3,102:1,...}
+
+  const totalOthers = useMemo(
+    () => Object.values(others).reduce((a, b) => a + b, 0),
+    [others]
+  );
+
+  /* ---------- resolve userId ---------- */
   useEffect(() => {
-    (async () => {
-      setLoading(true);
-      try {
-        const me = await fetchJSON<{ userId: number }>("/api/me");
-        setMeId(Number(me.userId));
-        const inv = await fetchJSON<{ items: Item[] }>(`/api/inventory?userId=${me.userId}`);
-        setItems(inv.items ?? []);
-      } catch (e) {
-        alert((e as Error).message || "load failed");
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, []);
+    const inQuery = Number(params.get("userId") ?? "0");
+    if (Number.isFinite(inQuery) && inQuery > 0) {
+      setUserId(inQuery);
+      return;
+    }
+    // fallback: เรียก /api/me
+    fetchJSON<MeResponse>("/api/me")
+      .then((res) => {
+        if ("error" in res) throw new Error(res.error);
+        setUserId(res.userId);
+      })
+      .catch((e) => {
+        alert(`me route failed: ${e instanceof Error ? e.message : String(e)}`);
+      });
+  }, [params]);
 
-  const characters = useMemo(() => items.filter(i => i.kind === "character"), [items]);
-  const othersPool = useMemo(() => items.filter(i => i.kind !== "character"), [items]);
+  /* ---------- load inventory ---------- */
+  useEffect(() => {
+    if (!userId) return;
+    fetchJSON<InventoryResponse>(`/api/inventory?userId=${userId}`)
+      .then((res) => {
+        if ("error" in res) throw new Error(res.error);
+        setInv(res.items);
+      })
+      .catch((e) => {
+        alert(
+          `load inventory failed: ${e instanceof Error ? e.message : String(e)}`
+        );
+      });
+  }, [userId]);
 
-  /* actions */
-  function toggleChar(cardId: number) {
-    if (chars.includes(cardId)) setChars(chars.filter(x => x !== cardId));
-    else if (chars.length < 3) setChars([...chars, cardId]);
-  }
-  function incOther(cardId: number) {
-    const max = items.find(i => i.cardId === cardId)?.qty ?? 0;
-    const cur = others[cardId] ?? 0;
-    if (totalOthers >= 20 || cur >= max) return;
-    setOthers({ ...others, [cardId]: cur + 1 });
-  }
-  function decOther(cardId: number) {
-    const cur = others[cardId] ?? 0;
-    if (cur <= 0) return;
-    const next = { ...others, [cardId]: cur - 1 };
-    if (next[cardId] === 0) delete next[cardId];
-    setOthers(next);
+  /* ---------- character pick toggle ---------- */
+  function toggleChar(id: number) {
+    setChars((prev) => {
+      const has = prev.includes(id);
+      if (has) return prev.filter((x) => x !== id);
+      if (prev.length >= 3) return prev; // เต็ม 3
+      return [...prev, id];
+    });
   }
 
-  async function save() {
-    if (!meId) return alert("no user");
+  /* ---------- others add/remove ---------- */
+  function canAdd(cardId: number, owned: number, current: number): boolean {
+    return totalOthers < 20 && current < owned;
+  }
+
+  function addOne(cardId: number, owned: number) {
+    setOthers((prev) => {
+      const cur = prev[cardId] ?? 0;
+      if (!canAdd(cardId, owned, cur)) return prev;
+      return { ...prev, [cardId]: cur + 1 };
+    });
+  }
+
+  function removeOne(cardId: number) {
+    setOthers((prev) => {
+      const cur = prev[cardId] ?? 0;
+      if (cur <= 0) return prev;
+      const next: OthersState = { ...prev, [cardId]: cur - 1 };
+      if (next[cardId] === 0) delete next[cardId];
+      return next;
+    });
+  }
+
+  /* ---------- save ---------- */
+  async function onSave() {
     try {
-      const payload = {
-        userId: meId,
-        name,
-        characters: chars,
-        cards: Object.entries(others).map(([k, v]) => ({ cardId: Number(k), count: v })),
+      if (!userId) throw new Error("missing userId");
+      const cards: { cardId: number; count: number }[] = Object.entries(
+        others
+      )
+        .map(([k, v]) => ({ cardId: Number(k), count: v }))
+        .filter((x) => x.count > 0);
+
+      const body: SaveBody = {
+        userId,
+        name: deckName.trim() || "My Deck",
+        characters: [...chars],
+        cards,
       };
-      const res = await fetchJSON<{ ok: boolean; deckId: number }>("/api/deck", {
+
+      const res = await fetchJSON<SaveResponse>("/api/deck", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(body),
       });
-      alert(`Saved deck #${res.deckId}`);
+
+      if ("error" in res) throw new Error(res.error);
+      alert("Saved!");
+      router.refresh();
     } catch (e) {
-      alert((e as Error).message || "save failed");
+      const msg = e instanceof Error ? e.message : String(e);
+      alert(`save failed: ${msg}`);
     }
   }
 
-  /* UI */
+  const canSave = chars.length <= 3 && totalOthers <= 20;
+
+  /* ============ UI ============ */
+
   return (
-    <div className="min-h-screen bg-neutral-950 text-neutral-100">
-      {/* toolbar */}
-      <header className="sticky top-0 z-10 backdrop-blur bg-neutral-950/60 border-b border-neutral-900">
-        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center gap-3">
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            className="px-3 py-2 rounded-xl bg-neutral-900 border border-neutral-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
-            aria-label="Deck name"
-          />
-          <div className="ml-auto flex items-center gap-2">
-            <span className="text-xs px-2 py-1 rounded-md border border-neutral-800 bg-neutral-900/70">
-              Chars {chars.length}/3
-            </span>
-            <span className="text-xs px-2 py-1 rounded-md border border-neutral-800 bg-neutral-900/70">
-              Others {totalOthers}/20
-            </span>
-            <button
-              onClick={save}
-              disabled={!meId || chars.length === 0 || totalOthers === 0}
-              className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40"
-            >
-              Save
-            </button>
-          </div>
+    <main className="min-h-screen p-6 flex flex-col gap-6">
+      <div className="flex items-center gap-3">
+        <input
+          className="px-3 py-2 rounded bg-neutral-900 border border-white/10 w-64"
+          value={deckName}
+          onChange={(e) => setDeckName(e.target.value)}
+          placeholder="My Deck"
+        />
+        <span className="text-sm opacity-75">Chars {chars.length}/3</span>
+        <span className="text-sm opacity-75">Others {totalOthers}/20</span>
+        <button
+          className={`ml-auto px-4 py-2 rounded ${
+            canSave
+              ? "bg-emerald-600 hover:bg-emerald-500"
+              : "bg-neutral-700 opacity-60 cursor-not-allowed"
+          }`}
+          disabled={!canSave}
+          onClick={onSave}
+        >
+          Save
+        </button>
+      </div>
+
+      {/* Characters */}
+      <section>
+        <h2 className="font-semibold mb-2">Characters</h2>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+          {characters.map((it) => {
+            const picked = chars.includes(it.cardId);
+            const src = cardImagePath(it.code, "character");
+            return (
+              <button
+                key={it.cardId}
+                type="button"
+                onClick={() => toggleChar(it.cardId)}
+                className={[
+                  "relative h-32 rounded-2xl overflow-hidden text-left",
+                  "bg-neutral-900/60 border",
+                  picked
+                    ? "border-emerald-400 ring-2 ring-emerald-400/40"
+                    : "border-neutral-900 hover:border-neutral-800",
+                ].join(" ")}
+                aria-label={it.code}
+              >
+                <Image
+                  src={src}
+                  alt={it.code}
+                  fill
+                  className="object-cover"
+                  sizes="(max-width: 768px) 33vw, (max-width: 1024px) 20vw, 16vw"
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-black/55 via-black/0 to-black/10" />
+                <div className="absolute top-1 left-2 text-[10px] px-1.5 py-0.5 rounded bg-black/55">
+                  #{it.cardId}
+                </div>
+                <span className="absolute top-1 right-2 text-[10px] px-2 py-0.5 rounded-full bg-black/60">
+                  x{it.qty}
+                </span>
+                <div className="absolute left-2 bottom-1 text-xs font-semibold drop-shadow">
+                  {codeToPrettyName(it.code)}
+                </div>
+              </button>
+            );
+          })}
         </div>
-      </header>
+      </section>
 
-      {/* content */}
-      <main className="max-w-6xl mx-auto px-4 py-6 space-y-6">
-        {/* Characters */}
-        <section>
-          <h2 className="font-semibold mb-2">Characters</h2>
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
-            {loading
-              ? Array.from({ length: 12 }).map((_, i) => (
-                  <div key={i} className="h-24 rounded-2xl bg-neutral-900/50 border border-neutral-900 animate-pulse" />
-                ))
-              : characters.map((it) => {
-                  const picked = chars.includes(it.cardId);
-                  return (
-                    <button
-                      key={it.cardId}
-                      onClick={() => toggleChar(it.cardId)}
-                      className={[
-                        "relative h-24 rounded-2xl text-left px-3 py-2",
-                        "bg-neutral-900/60 hover:bg-neutral-900 border border-transparent hover:border-neutral-800",
-                        picked ? "ring-2 ring-emerald-400/40" : "",
-                      ].join(" ")}
-                    >
-                      <div className="text-[10px] opacity-70">#{it.cardId}</div>
-                      <div className="font-semibold truncate">{it.code}</div>
-                      <span className="absolute top-2 right-2 text-[10px] px-2 py-0.5 rounded-full bg-neutral-800/70 border border-neutral-800">
-                        x{it.qty}
-                      </span>
-                    </button>
-                  );
-                })}
-            {!loading && characters.length === 0 && (
-              <div className="col-span-full py-8 text-center text-sm opacity-60 border border-dashed border-neutral-900 rounded-xl">
-                ยังไม่มีการ์ดตัวละคร
-              </div>
-            )}
-          </div>
-        </section>
+      {/* Supports & Events */}
+      <section>
+        <h2 className="font-semibold mb-2">Supports &amp; Events</h2>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+          {othersPool.map((it) => {
+            const cur = others[it.cardId] ?? 0;
+            const left = it.qty - cur;
+            const src = cardImagePath(it.code, it.kind);
+            const disabled = !(totalOthers < 20 && left > 0);
 
-        {/* Supports & Events */}
-        <section>
-          <h2 className="font-semibold mb-2">Supports & Events</h2>
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
-            {loading
-              ? Array.from({ length: 12 }).map((_, i) => (
-                  <div key={i} className="h-24 rounded-2xl bg-neutral-900/50 border border-neutral-900 animate-pulse" />
-                ))
-              : othersPool.map((it) => {
-                  const cur = others[it.cardId] ?? 0;
-                  const left = it.qty - cur;
-                  return (
-                    <div
-                      key={it.cardId}
-                      className="relative h-24 rounded-2xl px-3 py-2 bg-neutral-900/60 border border-neutral-900"
-                    >
-                      <div className="text-[10px] opacity-70">#{it.cardId}</div>
-                      <div className="font-semibold truncate">{it.code}</div>
+            return (
+              <button
+                key={it.cardId}
+                type="button"
+                onClick={() => addOne(it.cardId, it.qty)}
+                disabled={disabled}
+                className={[
+                  "relative h-28 rounded-2xl overflow-hidden border text-left",
+                  "bg-neutral-900/60",
+                  disabled
+                    ? "border-neutral-900 opacity-60 grayscale"
+                    : "border-neutral-900 hover:brightness-110",
+                ].join(" ")}
+                aria-label={`add ${it.code}`}
+              >
+                <Image
+                  src={src}
+                  alt={it.code}
+                  fill
+                  className="object-cover"
+                  sizes="(max-width: 768px) 33vw, (max-width: 1024px) 20vw, 16vw"
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-black/0 to-black/20" />
+                <div className="absolute top-1 left-2 flex items-center gap-2">
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-black/55">
+                    #{it.cardId}
+                  </span>
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-black/55">
+                    owned {it.qty}
+                  </span>
+                </div>
+                <div className="absolute left-2 bottom-2 text-xs font-semibold drop-shadow">
+                  {codeToPrettyName(it.code)}
+                </div>
 
-                      <span className="absolute top-2 right-2 text-[10px] px-2 py-0.5 rounded-full bg-neutral-800/70 border border-neutral-800">
-                        owned {it.qty}
-                      </span>
+                {/* ปุ่มลบ (เฉพาะตอนเลือกแล้ว) */}
+                {cur > 0 && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      removeOne(it.cardId);
+                    }}
+                    className="absolute top-1 right-1 w-7 h-7 grid place-items-center rounded-lg bg-black/60 hover:bg-black/70 border border-white/10"
+                    aria-label="remove one"
+                  >
+                    −
+                  </button>
+                )}
 
-                      <div className="absolute bottom-2 right-2 flex items-center gap-2">
-                        <button
-                          onClick={() => decOther(it.cardId)}
-                          className="w-7 h-7 grid place-items-center rounded-lg bg-neutral-800 hover:bg-neutral-700 border border-neutral-800"
-                        >
-                          −
-                        </button>
-                        <span className="min-w-[1.75rem] text-center text-sm">{cur}</span>
-                        <button
-                          onClick={() => incOther(it.cardId)}
-                          disabled={left <= 0 || totalOthers >= 20}
-                          className={[
-                            "w-7 h-7 grid place-items-center rounded-lg",
-                            left > 0 && totalOthers < 20
-                              ? "bg-emerald-700 hover:bg-emerald-600"
-                              : "bg-neutral-800 border border-neutral-800 opacity-50 cursor-not-allowed",
-                          ].join(" ")}
-                        >
-                          +
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-            {!loading && othersPool.length === 0 && (
-              <div className="col-span-full py-8 text-center text-sm opacity-60 border border-dashed border-neutral-900 rounded-xl">
-                ยังไม่มีการ์ดเสริมหรืออีเวนต์
-              </div>
-            )}
-          </div>
-        </section>
-      </main>
-    </div>
+                {/* counter ที่เลือกแล้ว */}
+                <div className="absolute bottom-2 right-2 px-2 py-0.5 rounded-lg text-sm bg-black/60 border border-white/10">
+                  {cur}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </section>
+    </main>
   );
 }
+
+/* ============ mapping note ============
+
+- Inventory/DB:
+  char_1..char_12  → characters จาก cards.json (char_id ตรงตัว)
+  card_1 (slot1)   → supports[0]  (เช่น HEALING_AMULET)
+  card_2 (slot2)   → supports[1]  (เช่น BLAZING_SIGIL)
+  card_3 (slot3)   → events[0]    (เช่น FIREWORKS)
+
+- ใน UI/Save:
+  ตัวละครใช้ id 1..12
+  การ์ดเสริม/อีเวนต์ใช้ internal id 101..103 (OTHER_ID_BASE+slot)
+
+*/

@@ -69,7 +69,7 @@ const CARD_IMG: Record<string, string> = Object.fromEntries(
   ([...cardsData.characters, ...cardsData.supports, ...cardsData.events] as Array<{
     code: string;
     art: string;
-  }>).map((c) => [c.code, `/cards/${c.art}` as const]),
+  }>).map((c) => [c.code, `/char_cards/${c.art}` as const]),
 ) as Record<string, string>;
 
 /* ===================== small UI bits ===================== */
