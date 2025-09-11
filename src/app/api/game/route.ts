@@ -44,11 +44,7 @@ type EventCard = {
   text: string;
   art: string;
 };
-type CardsData = {
-  characters: CharacterCard[];
-  supports: SupportCard[];
-  events: EventCard[];
-};
+type CardsData = { characters: CharacterCard[]; supports: SupportCard[]; events: EventCard[] };
 const cardsData = cardsDataJson as CardsData;
 
 /* ========================= Types & Room ========================= */
@@ -77,13 +73,9 @@ type RoomState = {
   warnNoDeck?: string[];
 };
 
-/* ---------- Supabase table “rooms” rows ---------- */
 type RoomRow = { id: string; version: number; state_json: unknown; updated_at?: string | null };
-
-/* ---------- Supabase table “users” (optional) ---------- */
 type UserRow = { id: number; username: string | null; discord_id: string | null; email?: string | null };
 
-/* ---------- Supabase table “decks” (optional) ---------- */
 type CardIndex =
   | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10
   | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20;
@@ -102,13 +94,7 @@ type DeckRow = {
 const ELEMENTS = ["Pyro","Hydro","Cryo","Electro","Geo","Anemo","Quantum","Imaginary","Neutral","Infinite"] as const;
 type ElementKind = (typeof ELEMENTS)[number];
 
-function shuffle<T>(arr: T[]) {
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = (Math.random() * (i + 1)) | 0;
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-  return arr;
-}
+function shuffle<T>(arr: T[]) { for (let i = arr.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [arr[i], arr[j]] = [arr[j], arr[i]]; } return arr; }
 const allChars = (): CharacterCard[] => cardsData.characters;
 const allSupports = (): SupportCard[] => cardsData.supports;
 const allEvents = (): EventCard[] => cardsData.events;
@@ -196,7 +182,7 @@ async function loadRoom(roomId: string): Promise<{ state: RoomState; version: nu
       await supa.from("rooms").insert({ id, version: 1, state_json: state });
       return { state, version: 1 };
     } catch {
-      // fall back to local
+      // fall back
     }
   }
 
@@ -234,7 +220,7 @@ async function saveRoom(
       const curVer = Number((cur.data?.version ?? 1) as number);
       return saveRoom(id, nextState, curVer, retry + 1);
     } catch {
-      // fall back to local
+      // fall back
     }
   }
 
@@ -261,36 +247,24 @@ async function qUserBy(key: "discord_id" | "email" | "username", value: string):
       .maybeSingle();
     if (error) return null;
     return data as unknown as UserRow | null;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
-
 async function findUserRowByAny(key: string, display?: string | null): Promise<UserRow | null> {
   if (!DB_ON) return null;
-  if (/^\d{6,}$/.test(key)) {
-    const byDiscord = await qUserBy("discord_id", key);
-    if (byDiscord) return byDiscord;
-  }
-  if (/@/.test(key)) {
-    const byEmail = await qUserBy("email", key);
-    if (byEmail) return byEmail;
-  }
+  if (/^\d{6,}$/.test(key)) { const u = await qUserBy("discord_id", key); if (u) return u; }
+  if (/@/.test(key)) { const u = await qUserBy("email", key); if (u) return u; }
   const name = display ?? key;
-  const byName = await qUserBy("username", name);
-  return byName ?? null;
+  const u = await qUserBy("username", name);
+  return u ?? null;
 }
-
 async function loadDeckFromDB(userId: number): Promise<{ chars: string[]; deck: string[] } | null> {
   if (!DB_ON || !supa) return null;
   const { data, error } = await supa.from("decks").select("*").eq("user_id", userId).maybeSingle();
   if (error || !data) return null;
-
   const row = data as unknown as DeckRow;
 
   const charIdToCode = new Map<number, string>();
   for (const ch of allChars()) charIdToCode.set(Number(ch.char_id), String(ch.code));
-
   const chars = [row.card_char1, row.card_char2, row.card_char3]
     .map((id) => (id ? charIdToCode.get(Number(id)) : null))
     .filter((x): x is string => !!x);
@@ -332,23 +306,12 @@ async function startGame(room: RoomState) {
       const u = await findUserRowByAny(p.userId, p.name ?? null);
       if (u) {
         const fromDb = await loadDeckFromDB(u.id);
-        if (fromDb) {
-          boardCodes = fromDb.chars.slice(0, 3);
-          deckCodes = fromDb.deck.slice();
-        }
+        if (fromDb) { boardCodes = fromDb.chars.slice(0, 3); deckCodes = fromDb.deck.slice(); }
       }
     }
 
-    if (!boardCodes.length) {
-      const candidates = allChars().map((c) => c.code);
-      shuffle(candidates);
-      boardCodes = candidates.slice(0, 3);
-    }
-    if (!deckCodes.length) {
-      const supports = allSupports().map((c) => c.code);
-      const events = allEvents().map((c) => c.code);
-      deckCodes = shuffle([...supports, ...events, ...supports, ...events]);
-    }
+    if (!boardCodes.length) { const candidates = allChars().map((c) => c.code); shuffle(candidates); boardCodes = candidates.slice(0, 3); }
+    if (!deckCodes.length) { const supports = allSupports().map((c) => c.code); const events = allEvents().map((c) => c.code); deckCodes = shuffle([...supports, ...events, ...supports, ...events]); }
 
     room.board[side] = boardCodes.map((c) => toUnit(c)!).filter(Boolean);
     room.deck[side] = deckCodes;
@@ -361,8 +324,7 @@ async function startGame(room: RoomState) {
   room.dice.p2 = {};
   for (let i = 0; i < 10; i++) {
     const el = ELEMENTS[(Math.random() * (ELEMENTS.length - 1)) | 0];
-    addDie(room.dice.p1, el);
-    addDie(room.dice.p2, el);
+    addDie(room.dice.p1, el); addDie(room.dice.p2, el);
   }
 
   const win: Side = Math.random() < 0.5 ? "p1" : "p2";
@@ -396,11 +358,9 @@ function stateForClient(room: RoomState, currentUserId?: string) {
   };
 }
 
-/* ==== Loose helpers for anonymous interactions (สำคัญสำหรับปุ่ม Ready) ==== */
+/* ==== anonymous helpers (ให้ Ready ได้แม้ไม่มี userId) ==== */
 function ensureSeat(room: RoomState, side: Side, fallbackName: string) {
-  if (!room.players[side]) {
-    room.players[side] = { userId: `anon:${side}`, name: fallbackName };
-  }
+  if (!room.players[side]) room.players[side] = { userId: `anon:${side}`, name: fallbackName };
 }
 function pickSideForAnonymousReady(room: RoomState): Side | null {
   if (!room.ready.p1) return "p1";
@@ -459,9 +419,7 @@ function endPhase(room: RoomState, userId: string) {
   room.phaseActor = starter;
   room.endTurned = { p1: false, p2: false };
   room.phaseEndOrder = [];
-
-  draw(room, "p1", 2);
-  draw(room, "p2", 2);
+  draw(room, "p1", 2); draw(room, "p2", 2);
 }
 function playCard(room: RoomState, userId: string, handIndex: number) {
   const s = sideOf(room, userId);
@@ -470,10 +428,7 @@ function playCard(room: RoomState, userId: string, handIndex: number) {
   const card = room.hand[s][handIndex];
   if (!card) return;
 
-  if (allChars().some((c) => c.code === card)) {
-    room.hand[s].splice(handIndex, 1);
-    return;
-  }
+  if (allChars().some((c) => c.code === card)) { room.hand[s].splice(handIndex, 1); return; }
 
   if (card === "HEALING_AMULET") {
     room.hero[s] = Math.min(room.hero[s] + 2, 30);
@@ -481,9 +436,8 @@ function playCard(room: RoomState, userId: string, handIndex: number) {
     room.board[s].forEach((u) => (u.hp += 2));
   } else if (card === "FIREWORKS") {
     const foe: Side = s === "p1" ? "p2" : "p1";
-    if (room.board[foe].length === 0) {
-      room.hero[foe] = Math.max(0, room.hero[foe] - 2);
-    } else {
+    if (room.board[foe].length === 0) { room.hero[foe] = Math.max(0, room.hero[foe] - 2); }
+    else {
       for (let i = room.board[foe].length - 1; i >= 0; i--) {
         room.board[foe][i].hp -= 2;
         if (room.board[foe][i].hp <= 0) room.board[foe].splice(i, 1);
@@ -510,7 +464,6 @@ function combat(room: RoomState, userId: string, attackerIndex: number, targetIn
   const s = sideOf(room, userId);
   if (!s) throw new Error("Not in room");
   if (room.phaseActor !== s) return;
-
   const foe: Side = s === "p1" ? "p2" : "p1";
   const atk = room.board[s][attackerIndex];
   if (!atk) return;
@@ -519,29 +472,14 @@ function combat(room: RoomState, userId: string, attackerIndex: number, targetIn
   let dmg = atk.attack;
   let did = false;
 
-  if (mode === "basic") {
-    if (!spendAny(poolD, 1)) return;
-    dmg = atk.attack;
-    atk.gauge = Math.min((atk.gauge ?? 0) + 1, 3);
-    did = true;
-  } else if (mode === "skill") {
-    if (!spendElement(poolD, atk.element as ElementKind, 3)) return;
-    dmg = atk.attack + 1;
-    atk.gauge = Math.min((atk.gauge ?? 0) + 1, 3);
-    did = true;
-  } else if (mode === "ult") {
-    if ((atk.gauge ?? 0) < 3) return;
-    if (!spendElement(poolD, atk.element as ElementKind, 5)) return;
-    dmg = atk.attack + 3;
-    atk.gauge = 0;
-    did = true;
-  }
+  if (mode === "basic") { if (!spendAny(poolD, 1)) return; dmg = atk.attack; atk.gauge = Math.min((atk.gauge ?? 0) + 1, 3); did = true; }
+  else if (mode === "skill") { if (!spendElement(poolD, atk.element as ElementKind, 3)) return; dmg = atk.attack + 1; atk.gauge = Math.min((atk.gauge ?? 0) + 1, 3); did = true; }
+  else if (mode === "ult") { if ((atk.gauge ?? 0) < 3) return; if (!spendElement(poolD, atk.element as ElementKind, 5)) return; dmg = atk.attack + 3; atk.gauge = 0; did = true; }
 
   if (!did) return;
 
-  if (room.board[foe].length === 0) {
-    room.hero[foe] = Math.max(0, room.hero[foe] - dmg);
-  } else {
+  if (room.board[foe].length === 0) room.hero[foe] = Math.max(0, room.hero[foe] - dmg);
+  else {
     const t = targetIndex ?? 0;
     const tgt = room.board[foe][t];
     if (!tgt) return;
@@ -603,7 +541,17 @@ export async function POST(req: Request) {
     };
 
     const action = String(body?.action || "");
-    const roomId = String(body?.roomId || "").toUpperCase();
+
+    // --- เดา roomId จาก body หรือ Referer ---
+    let roomId = String(body?.roomId || "").toUpperCase();
+    if (!roomId) {
+      const ref = req.headers.get("referer") || "";
+      try {
+        const u = new URL(ref);
+        const m = u.pathname.match(/\/play\/([A-Za-z0-9]+)/);
+        if (m) roomId = m[1].toUpperCase();
+      } catch {}
+    }
 
     const noRoomNeeded = new Set(["hello", "createRoom", "joinRoom"]);
     if (!action) throw new Error("Missing action");
@@ -638,31 +586,30 @@ export async function POST(req: Request) {
       }
 
       case "ready": {
-        // ทำให้ใช้งานได้แม้ไม่มี userId
-        const uid = String((body.user as PlayerInfo | undefined)?.userId || body.userId || "");
+        const user = body.user as PlayerInfo | undefined;
+        // ถ้ามี user มาก็ sync ชื่อ/avatar ให้ที่ที่นั่งเดิม
+        if (user?.userId) {
+          const s = sideOf(room, user.userId);
+          if (s) room.players[s] = user;
+        }
+
+        const uid = String(user?.userId || body.userId || "");
         if (uid) {
-          // ปกติ: มี userId
           markReady(room, uid);
         } else {
-          // โหมดหลวม ๆ: เดาว่าควร ready ที่ฝั่งไหน
+          // โหมด anonymous: เดาให้
           const side = pickSideForAnonymousReady(room);
-          if (!side) {
-            // ทั้งคู่ ready แล้วก็ผ่านเฉย ๆ
-          } else {
+          if (side) {
             ensureSeat(room, side, side === "p1" ? "Host" : "Player");
             room.ready[side] = true;
           }
         }
 
-        // เตือน deck & เริ่มเกมถ้าครบ
-        const missing: string[] = [];
-        for (const s of ["p1", "p2"] as const) {
-          if (!room.players[s]) missing.push(s === "p1" ? "P1" : "P2");
-        }
-        room.warnNoDeck = missing.length ? missing : undefined;
+        // เริ่มเกมเมื่อครบ
         if (room.ready.p1 && room.ready.p2 && room.mode !== "play") {
           await startGame(room);
         }
+
         await saveRoom(roomId, room, ver);
         return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
       }
