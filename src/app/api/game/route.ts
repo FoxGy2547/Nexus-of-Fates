@@ -602,21 +602,37 @@ export async function POST(req: Request) {
         const uid = String(user?.userId || body.userId || "");
         if (!uid) throw new Error("Missing userId");
 
-        // ถ้ายังไม่มีที่นั่ง -> จับนั่งลงที่ว่าง (p1 ก่อน, ไม่งั้น p2)
+        // หาเก้าอี้ของคนนี้ก่อน
         let s = sideOf(room, uid);
+
+        // ยังไม่มีที่นั่ง -> ให้นั่งลงที่ว่างก่อน (p1 ก่อน p2)
         if (!s) {
           const seatUser: PlayerInfo = user ?? { userId: uid, name: null, avatar: null };
+
           if (!room.players.p1) { room.players.p1 = seatUser; s = "p1"; }
           else if (!room.players.p2) { room.players.p2 = seatUser; s = "p2"; }
-          else { throw new Error("Room is full"); }
+          else if (room.mode === "lobby") {
+            // ทั้งสองฝั่งมีคนแล้ว แต่ยังอยู่ใน lobby:
+            // อนุญาต "ยึดเก้าอี้ที่ยังไม่ ready"
+            if (!room.ready.p1) { room.players.p1 = seatUser; s = "p1"; }
+            else if (!room.ready.p2) { room.players.p2 = seatUser; s = "p2"; }
+            else {
+              // ทั้งสองฝั่ง ready แล้ว ถึงค่อยถือว่าเต็ม
+              throw new Error("Room is full");
+            }
+          } else {
+            // ไม่ใช่ lobby แล้ว ห้ามยึด
+            throw new Error("Room is full");
+          }
         } else {
-          if (user) room.players[s] = user; // sync ชื่อ/รูป
+          // มีเก้าอี้อยู่แล้ว อัปเดตชื่อ/รูปให้ตรงล่าสุด
+          if (user) room.players[s] = user;
         }
 
         // ทำเครื่องหมายพร้อม
         room.ready[s] = true;
 
-        // เริ่มเกมเมื่อครบ
+        // เริ่มเกมเมื่อครบ 2 ฝั่ง
         if (room.ready.p1 && room.ready.p2 && room.mode !== "play") {
           await startGame(room);
         }

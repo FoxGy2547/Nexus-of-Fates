@@ -89,6 +89,10 @@ export default function Home() {
   const [createCode, setCreateCode] = useState<string>(randRoom());
   const [joinCode, setJoinCode] = useState<string>("");
 
+  // user id ที่ใช้กับ Deck Builder (เป็น id จากตาราง users ใน DB)
+  // ใส่ค่าเริ่มต้นเป็น 6 ตามข้อมูลที่มีตอนนี้ (2,4,6)
+  const [invUserId, setInvUserId] = useState<number>(6);
+
   const user: PlayerInfo = useMemo(() => {
     const id = stableUserId(session);
     return {
@@ -209,15 +213,33 @@ export default function Home() {
 
       {/* deck builder entry */}
       <section className="rounded-xl border border-white/10 p-4 bg-black/20">
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <div className="font-semibold">Deck Builder</div>
           <span className="text-sm opacity-70">
             จัดเด็ค: เลือกตัวละคร ≤ 3 ใบ และการ์ดเสริม/อีเวนต์รวม ≤ 20 ใบ
           </span>
-          <div className="ml-auto">
+
+          {/* เลือก user id (inventory owner) แบบมินิมอล */}
+          <div className="ml-auto flex items-center gap-2">
+            <label className="text-sm opacity-80">Inventory user:</label>
+            <div className="inline-flex rounded-lg overflow-hidden border border-white/10">
+              {[2, 4, 6].map((id) => (
+                <button
+                  key={id}
+                  onClick={() => setInvUserId(id)}
+                  className={[
+                    "px-3 py-1.5 text-sm",
+                    invUserId === id ? "bg-purple-600" : "bg-neutral-800 hover:bg-neutral-700",
+                  ].join(" ")}
+                >
+                  #{id}
+                </button>
+              ))}
+            </div>
+
             <button
               className="px-4 py-2 rounded bg-purple-600 hover:bg-purple-500"
-              onClick={() => router.push("/deck-builder")}
+              onClick={() => router.push(`/deck-builder?userId=${invUserId}`)}
             >
               Open Deck Builder
             </button>
