@@ -19,9 +19,6 @@ function idToSlot(cardId: number): Slot | null {
   const s = cardId - OTHER_ID_BASE;
   return s === 1 || s === 2 || s === 3 ? (s as Slot) : null;
 }
-function slotToId(slot: Slot): number {
-  return OTHER_ID_BASE + slot;
-}
 
 function padToNumNull(arr: number[], len: number): (number | null)[] {
   if (arr.length >= len) return arr.slice(0, len) as (number | null)[];
