@@ -26,7 +26,6 @@ async function post<T>(body: unknown): Promise<T> {
   }
 
   if (!res.ok) {
-    // ห้ามใช้ ?? ปะปนกับ || โดยไม่ใส่วงเล็บ (ตัวแปลงของ Next จะ error)
     const msg =
       ((json as { error?: string } | null)?.error) ??
       (rawText || res.statusText || "Request failed");
@@ -58,9 +57,8 @@ function stableUserId(session: Session | null | undefined): string {
 
   const key = "NOF_guestId";
   const existing = localStorage.getItem(key);
-  if (existing) return existing; // เป็น string แน่นอน
+  if (existing) return existing;
 
-  // สร้าง guest id ใหม่ แล้วบันทึก
   const rnd = safeRandomId();
   localStorage.setItem(key, rnd);
   return rnd;
@@ -108,7 +106,6 @@ export default function Home() {
         roomId,
         user,
       });
-      // เผื่อ API ไม่ส่ง roomId กลับมา ใช้ตัวที่เราส่งแทน ป้องกัน /undefined
       router.push(`/play/${(res.roomId || roomId).toUpperCase()}`);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "unknown";
@@ -209,18 +206,23 @@ export default function Home() {
           </div>
         </div>
       </section>
-      {/* deck builder */}
+
+      {/* deck builder entry */}
       <section className="rounded-xl border border-white/10 p-4 bg-black/20">
-        <div className="font-semibold mb-2">Deck Builder</div>
-        <p className="text-sm opacity-70 mb-3">
-          จัดเด็คของคุณ: เลือกตัวละครสูงสุด 3 ใบ และการ์ดเสริม/อีเวนต์รวม 20 ใบ
-        </p>
-        <button
-          className="px-4 py-2 rounded bg-purple-600 hover:bg-purple-500"
-          onClick={() => router.push("/deck-builder")}
-        >
-          Open Deck Builder
-        </button>
+        <div className="flex items-center gap-3">
+          <div className="font-semibold">Deck Builder</div>
+          <span className="text-sm opacity-70">
+            จัดเด็ค: เลือกตัวละคร ≤ 3 ใบ และการ์ดเสริม/อีเวนต์รวม ≤ 20 ใบ
+          </span>
+          <div className="ml-auto">
+            <button
+              className="px-4 py-2 rounded bg-purple-600 hover:bg-purple-500"
+              onClick={() => router.push("/deck-builder")}
+            >
+              Open Deck Builder
+            </button>
+          </div>
+        </div>
       </section>
     </main>
   );

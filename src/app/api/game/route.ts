@@ -396,11 +396,6 @@ function joinRoomOp(room: RoomState, user: PlayerInfo) {
   throw new Error("Room is full");
 }
 
-function markReady(room: RoomState, userId: string) {
-  const s = sideOf(room, userId);
-  if (!s) throw new Error("Not in room");
-  room.ready[s] = true;
-}
 function ackCoin(room: RoomState, userId: string) {
   const s = sideOf(room, userId);
   if (!s) return;
