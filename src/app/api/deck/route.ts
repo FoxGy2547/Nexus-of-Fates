@@ -5,102 +5,150 @@ import { supa } from "@/lib/supabase";
 type SaveBody = {
   userId: number;
   name: string;
-  characters: number[];                        // ≤ 3
-  cards: { cardId: number; count: number }[];  // รวม ≤ 20
+  characters: number[];                        // 1..12 (จาก cards.json)
+  cards: { cardId: number; count: number }[];  // 101..103 = card_1..3
 };
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+const OTHER_ID_BASE = 100;
+type Slot = 1 | 2 | 3;
+
+function idToSlot(cardId: number): Slot | null {
+  const s = cardId - OTHER_ID_BASE;
+  return s === 1 || s === 2 || s === 3 ? (s as Slot) : null;
+}
+
+function padToNumNull(arr: number[], len: number): (number | null)[] {
+  if (arr.length >= len) return arr.slice(0, len) as (number | null)[];
+  const padCount = len - arr.length;
+  const pad = Array<number | null>(padCount).fill(null);
+  return (arr as (number | null)[]).concat(pad);
+}
+
 export async function POST(req: Request) {
+  let body: SaveBody;
   try {
-    const body = (await req.json()) as SaveBody;
+    body = (await req.json()) as SaveBody;
+  } catch {
+    return NextResponse.json({ error: "bad body" }, { status: 400 });
+  }
 
-    if (!body?.userId || !body?.name) return NextResponse.json({ error: "missing fields" }, { status: 400 });
-    if (!Array.isArray(body.characters) || body.characters.length > 3) {
-      return NextResponse.json({ error: "characters > 3" }, { status: 400 });
+  if (!body?.userId || !body?.name) {
+    return NextResponse.json({ error: "missing fields" }, { status: 400 });
+  }
+  if (!Array.isArray(body.characters) || body.characters.length > 3) {
+    return NextResponse.json({ error: "characters > 3" }, { status: 400 });
+  }
+  const totalOthers = body.cards.reduce((a, b) => a + (b.count || 0), 0);
+  if (totalOthers > 20) {
+    return NextResponse.json({ error: "support/events > 20" }, { status: 400 });
+  }
+
+  // โหลดสต็อกจาก inventorys
+  const inv = await supa
+    .from("inventorys")
+    .select(
+      "char_1, char_2, char_3, char_4, char_5, char_6, char_7, char_8, char_9, char_10, char_11, char_12, card_1, card_2, card_3"
+    )
+    .eq("user_id", body.userId)
+    .maybeSingle();
+
+  if (inv.error) {
+    return NextResponse.json({ error: inv.error.message }, { status: 400 });
+  }
+  if (!inv.data) {
+    return NextResponse.json({ error: "no inventory" }, { status: 400 });
+  }
+
+  const row = inv.data as Record<string, unknown>;
+
+  // ตัวละคร: ห้ามซ้ำ + ต้องมีของ ≥1
+  const uniq = new Set(body.characters);
+  if (uniq.size !== body.characters.length) {
+    return NextResponse.json({ error: "duplicate characters" }, { status: 400 });
+  }
+  for (const cid of body.characters) {
+    if (cid < 1 || cid > 12) {
+      return NextResponse.json({ error: `invalid character id ${cid}` }, { status: 400 });
     }
-    const totalOthers = body.cards.reduce((a, b) => a + (b.count || 0), 0);
-    if (totalOthers > 20) return NextResponse.json({ error: "support/events > 20" }, { status: 400 });
-
-    // สร้าง array 3 / 20 สำหรับคอลัมน์
-    const chars3 = (body.characters.slice(0, 3) as (number | null)[])
-      .concat([null, null, null])
-      .slice(0, 3);
-
-    const flatOthers: number[] = [];
-    for (const it of body.cards) for (let i = 0; i < it.count; i++) flatOthers.push(it.cardId);
-    const others20 = (flatOthers.slice(0, 20) as (number | null)[])
-      .concat(Array(20).fill(null))
-      .slice(0, 20);
-
-    // ตรวจสต็อกจาก user_inventory
-    const neededIds = [
-      ...new Set([...body.characters, ...body.cards.map((c) => c.cardId)]),
-    ];
-    if (neededIds.length) {
-      const inv = await supa
-        .from("user_inventory")
-        .select("card_id, qty")
-        .eq("user_id", body.userId)
-        .in("card_id", neededIds);
-
-      if (inv.error) throw inv.error;
-
-      const stock = new Map<number, number>();
-      (inv.data ?? []).forEach((r) => stock.set(Number(r.card_id), Number(r.qty)));
-
-      const uniq = new Set(body.characters);
-      if (uniq.size !== body.characters.length) {
-        return NextResponse.json({ error: "duplicate characters" }, { status: 400 });
-      }
-      for (const cid of body.characters) {
-        if ((stock.get(cid) || 0) < 1) {
-          return NextResponse.json({ error: "character not owned" }, { status: 400 });
-        }
-      }
-      for (const it of body.cards) {
-        if (it.count < 0) return NextResponse.json({ error: "bad count" }, { status: 400 });
-        if (it.count > (stock.get(it.cardId) || 0)) {
-          return NextResponse.json({ error: "exceed inventory" }, { status: 400 });
-        }
-      }
+    const qty = Number(row[`char_${cid}`] ?? 0);
+    if (qty < 1) {
+      return NextResponse.json({ error: `character ${cid} not owned` }, { status: 400 });
     }
+  }
 
-    // หา active deck ของ user
-    const existing = await supa
+  // การ์ดเสริม/อีเวนต์: รวมไม่เกินสต็อกใน card_1..3
+  const use: Record<Slot, number> = { 1: 0, 2: 0, 3: 0 };
+
+  for (const it of body.cards) {
+    const slot = idToSlot(it.cardId);
+    if (slot === null) {
+      return NextResponse.json({ error: `invalid support/event id ${it.cardId}` }, { status: 400 });
+    }
+    if (it.count < 0) {
+      return NextResponse.json({ error: "bad count" }, { status: 400 });
+    }
+    use[slot] = use[slot] + it.count;
+  }
+
+  if (use[1] > Number(row["card_1"] ?? 0)) {
+    return NextResponse.json({ error: "exceed inventory (card_1)" }, { status: 400 });
+  }
+  if (use[2] > Number(row["card_2"] ?? 0)) {
+    return NextResponse.json({ error: "exceed inventory (card_2)" }, { status: 400 });
+  }
+  if (use[3] > Number(row["card_3"] ?? 0)) {
+    return NextResponse.json({ error: "exceed inventory (card_3)" }, { status: 400 });
+  }
+
+  // เตรียมข้อมูลลง decks
+  const chars3: (number | null)[] = padToNumNull(body.characters.slice(0, 3), 3);
+
+  const flatOthers: number[] = [];
+  for (const it of body.cards) {
+    for (let i = 0; i < it.count; i++) flatOthers.push(it.cardId); // 101..103
+  }
+  const others20: (number | null)[] = padToNumNull(flatOthers.slice(0, 20), 20);
+
+  // หา active deck ของ user
+  const ex = await supa
+    .from("decks")
+    .select("id")
+    .eq("user_id", body.userId)
+    .eq("is_active", true)
+    .limit(1)
+    .maybeSingle();
+
+  if (ex.error) {
+    return NextResponse.json({ error: ex.error.message }, { status: 400 });
+  }
+
+  const payload: Record<string, unknown> = {
+    name: body.name,
+    card_char1: chars3[0],
+    card_char2: chars3[1],
+    card_char3: chars3[2],
+    is_active: true,
+  };
+  for (let i = 0; i < 20; i++) payload[`card${i + 1}`] = others20[i];
+
+  if (ex.data) {
+    const upd = await supa.from("decks").update(payload).eq("id", ex.data.id).select("id").single();
+    if (upd.error) {
+      return NextResponse.json({ error: upd.error.message }, { status: 400 });
+    }
+    return NextResponse.json({ ok: true, deckId: Number(upd.data.id) });
+  } else {
+    const ins = await supa
       .from("decks")
+      .insert([{ user_id: body.userId, created_at: new Date().toISOString(), ...payload }])
       .select("id")
-      .eq("user_id", body.userId)
-      .eq("is_active", true)
-      .limit(1)
-      .maybeSingle();
-    if (existing.error) throw existing.error;
-
-    const payload: Record<string, unknown> = {
-      name: body.name,
-      card_char1: chars3[0],
-      card_char2: chars3[1],
-      card_char3: chars3[2],
-      is_active: true,
-    };
-    for (let i = 0; i < 20; i++) payload[`card${i + 1}`] = others20[i];
-
-    if (existing.data) {
-      const upd = await supa.from("decks").update(payload).eq("id", existing.data.id).select("id").single();
-      if (upd.error) throw upd.error;
-      return NextResponse.json({ ok: true, deckId: Number(upd.data.id) });
-    } else {
-      const ins = await supa
-        .from("decks")
-        .insert([{ user_id: body.userId, created_at: new Date().toISOString(), ...payload }])
-        .select("id")
-        .single();
-      if (ins.error) throw ins.error;
-      return NextResponse.json({ ok: true, deckId: Number(ins.data.id) });
+      .single();
+    if (ins.error) {
+      return NextResponse.json({ error: ins.error.message }, { status: 400 });
     }
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: msg }, { status: 400 });
+    return NextResponse.json({ ok: true, deckId: Number(ins.data.id) });
   }
 }
