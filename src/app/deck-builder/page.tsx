@@ -1,4 +1,3 @@
-// src/app/deck-builder/page.tsx
 "use client";
 
 import React, { Suspense, useEffect, useState } from "react";
@@ -25,27 +24,30 @@ const cardsData  = cardsDataJson as CardsData;
 
 type Inventory = {
   userId: number;
-  chars:  Record<number, number>; // char_1..12
-  others: Record<number, number>; // card_1..3
+  chars:  Record<number, number>;
+  others: Record<number, number>;
 };
 
 type SaveBody = {
   userId: number;
   name: string;
-  characters: number[];                    // char_id ตรง ๆ
-  cards: { cardId: number; count: number }[]; // id ตรง ๆ
+  characters: number[];
+  cards: { cardId: number; count: number }[];
 };
 
+type GetDeckResp =
+  | { ok: true; deck: { name: string; characters: number[]; cards: { cardId: number; count: number }[] } }
+  | { ok: true; deck?: undefined };
+
 /* -------------------- const -------------------- */
-const CARD_W = 220; // ~ ครึ่งจากของเดิม
-const CARD_RATIO = "aspect-[2/3]"; // 1024x1536
+const CARD_W = 220;
+const CARD_RATIO = "aspect-[2/3]";
 
 /* -------------------- helpers -------------------- */
 function cardImg(art: string, kind: "character" | "support" | "event"): string {
-  const path = kind === "character" ? `/cards/char_cards/${art}` : `/cards/${art}`;
+  const path = kind === "character" ? `/char_cards/${art}` : `/cards/${art}`;
   return encodeURI(path);
 }
-
 async function getJSON<T>(url: string): Promise<T> {
   const r = await fetch(url, { cache: "no-store" });
   if (!r.ok) throw new Error(await r.text().catch(() => r.statusText));
@@ -87,11 +89,32 @@ function PageInner() {
   const [selChars, setSelChars]   = useState<number[]>([]);
   const [selOthers, setSelOthers] = useState<Record<number, number>>({});
 
+  // 1) โหลด inventory
   useEffect(() => {
     if (!userId) return;
     getJSON<Inventory>(`/api/inventory?userId=${userId}`)
       .then(setInv)
       .catch(e => { console.error(e); alert(`โหลด inventory ไม่ได้: ${String(e)}`); });
+  }, [userId]);
+
+  // 2) โหลด "เด็กล่าสุด" แล้วเติม state ให้ (prefill)
+  useEffect(() => {
+    if (!userId) return;
+    getJSON<GetDeckResp>(`/api/deck?userId=${userId}`)
+      .then((resp) => {
+        if (!resp.deck) return;
+        setName(resp.deck.name || "My Deck");
+        setSelChars(resp.deck.characters ?? []);
+        const rec: Record<number, number> = {};
+        for (const it of resp.deck.cards ?? []) {
+          rec[it.cardId] = it.count;
+        }
+        setSelOthers(rec);
+      })
+      .catch((e) => {
+        // ไม่มีเด็คก็ไม่เป็นไร ไม่ต้องเตือน
+        console.warn("load deck failed:", e);
+      });
   }, [userId]);
 
   function toggleChar(id: number) {
@@ -173,7 +196,6 @@ function PageInner() {
                 className="relative border border-white/10 p-3 rounded-xl bg-black/20 hover:bg-black/30"
                 style={{ width: CARD_W }}
               >
-                {/* overlays ต้องอยู่เหนือภาพเสมอ */}
                 <div className="absolute left-2 top-2 z-20"><Badge>#{o.id}</Badge></div>
                 <div className="absolute left-12 top-2 z-20"><Badge>owned {owned}</Badge></div>
 
@@ -187,7 +209,6 @@ function PageInner() {
                   </button>
                 )}
 
-                {/* กดภาพ = เพิ่ม 1 ใบ */}
                 <button className="block w-full text-left relative z-0" onClick={() => addOther(o.id)} title="กดการ์ดเพื่อเพิ่ม 1 ใบ">
                   <PortraitCardImage src={src} alt={o.code} />
                   <div className="mt-2 font-medium truncate">{o.name || o.code.replaceAll("_"," ")}</div>
