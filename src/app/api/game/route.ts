@@ -372,13 +372,22 @@ function pickSideForAnonymousReady(room: RoomState): Side | null {
 function createRoomOp(room: RoomState, user: PlayerInfo) {
   if (!room.players.p1 && !room.players.p2) room.players.p1 = user;
 }
+// ---------- แทนที่ joinRoomOp เดิม ----------
 function joinRoomOp(room: RoomState, user: PlayerInfo) {
   const s = sideOf(room, user.userId);
   if (s) { room.players[s] = user; return; }
+
+  // ถ้ามีเก้าอี้ anonymous ให้ยึดมาเป็นของผู้ใช้จริง
+  if (room.players.p1?.userId?.startsWith("anon:")) { room.players.p1 = user; return; }
+  if (room.players.p2?.userId?.startsWith("anon:")) { room.players.p2 = user; return; }
+
+  // ถ้าที่นั่งว่างก็ลงได้ตามปกติ
   if (!room.players.p1) { room.players.p1 = user; return; }
   if (!room.players.p2) { room.players.p2 = user; return; }
+
   throw new Error("Room is full");
 }
+
 function markReady(room: RoomState, userId: string) {
   const s = sideOf(room, userId);
   if (!s) throw new Error("Not in room");
@@ -585,27 +594,42 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
       }
 
+      // ---------- ในสวิตช์ case "ready": แทนบล็อกเดิมทั้งก้อน ----------
       case "ready": {
         const user = body.user as PlayerInfo | undefined;
-        // ถ้ามี user มาก็ sync ชื่อ/avatar ให้ที่ที่นั่งเดิม
-        if (user?.userId) {
-          const s = sideOf(room, user.userId);
-          if (s) room.players[s] = user;
-        }
 
-        const uid = String(user?.userId || body.userId || "");
-        if (uid) {
-          markReady(room, uid);
-        } else {
-          // โหมด anonymous: เดาให้
-          const side = pickSideForAnonymousReady(room);
-          if (side) {
-            ensureSeat(room, side, side === "p1" ? "Host" : "Player");
-            room.ready[side] = true;
+        // ถ้ามี user จริง แต่ยังไม่ได้นั่ง -> จับนั่ง (หรือยึดที่นั่ง anon)
+        if (user?.userId) {
+          const s0 = sideOf(room, user.userId);
+          if (!s0) {
+            joinRoomOp(room, user);
+          } else {
+            // sync ชื่อ/รูป
+            room.players[s0] = user;
           }
         }
 
-        // เริ่มเกมเมื่อครบ
+        // หา side ของผู้ที่กดยืนยัน
+        let uid = String(user?.userId || body.userId || "");
+        let s = uid ? sideOf(room, uid) : null;
+
+        // โหมด anonymous: ไม่มี userId จริง → สร้างที่นั่งชั่วคราวเฉพาะกรณีที่ยังมีที่ว่าง
+        if (!s) {
+          const side = pickSideForAnonymousReady(room); // คืน p1/p2 ถ้าที่นั่งนั้นยังไม่ ready
+          if (side) {
+            ensureSeat(room, side, side === "p1" ? "Host" : "Player");
+            s = side;
+            uid = room.players[side]!.userId; // จะเป็น "anon:p1/p2"
+          } else {
+            // ไม่มีที่ว่างแล้ว
+            throw new Error("Room is full");
+          }
+        }
+
+        // ทำเครื่องหมาย ready ให้ฝั่งนั้น
+        room.ready[s] = true;
+
+        // ถ้าพร้อมทั้งสองฝั่ง และเกมยังไม่เริ่ม → เริ่มเกม
         if (room.ready.p1 && room.ready.p2 && room.mode !== "play") {
           await startGame(room);
         }
