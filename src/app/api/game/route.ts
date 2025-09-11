@@ -1,9 +1,9 @@
 // src/app/api/game/route.ts
 import { NextResponse } from "next/server";
-import mysql from "mysql2/promise";
 import cardsDataJson from "@/data/cards.json";
+import { query, queryOne } from "@/lib/db";
+import type { QueryResultRow } from "pg";
 
-// ใช้ Node.js runtime (mysql2 ใช้กับ Edge ไม่ได้)
 export const runtime = "nodejs";
 
 /* ========================= Cards types ========================= */
@@ -43,54 +43,13 @@ type CardsData = {
 };
 const cardsData = cardsDataJson as CardsData;
 
-/* ========================= DB pool ========================= */
-function buildPool(): mysql.Pool | null {
-  const {
-    MYSQL_HOST,
-    MYSQL_USER,
-    MYSQL_PASSWORD,
-    MYSQL_DATABASE,
-    MYSQL_PORT,
-    DB_HOST,
-    DB_USER,
-    DB_PASS,
-    DB_NAME,
-    DB_PORT,
-    DATABASE_URL,
-  } = process.env as Record<string, string | undefined>;
-
-  if (DATABASE_URL) return mysql.createPool(DATABASE_URL);
-
-  const host = MYSQL_HOST ?? DB_HOST;
-  const user = MYSQL_USER ?? DB_USER;
-  const password = MYSQL_PASSWORD ?? DB_PASS;
-  const database = MYSQL_DATABASE ?? DB_NAME;
-  const port = Number(MYSQL_PORT ?? DB_PORT ?? 3306);
-  if (!host || !user || !database) return null;
-
-  return mysql.createPool({
-    host,
-    user,
-    password,
-    database,
-    port,
-    waitForConnections: true,
-    connectionLimit: 10,
-  });
-}
-
-// global singletons (กัน hot-reload dev)
-type GlobalWithPool = typeof globalThis & { __NOF_POOL__?: mysql.Pool | null };
-const gp = globalThis as GlobalWithPool;
-if (!gp.__NOF_POOL__) {
-  try {
-    gp.__NOF_POOL__ = buildPool();
-  } catch {
-    gp.__NOF_POOL__ = null;
-  }
-}
-const pool: mysql.Pool | null = gp.__NOF_POOL__;
-const DB_ON = !!pool;
+/* ========================= DB flag (เปิดเมื่อมี ENV) ========================= */
+const DB_ON = Boolean(
+  process.env.DATABASE_URL ||
+    process.env.DB_HOST ||
+    process.env.PGHOST ||
+    process.env.DB_URL
+);
 
 /* ========================= Types & Room ========================= */
 export type Side = "p1" | "p2";
@@ -119,12 +78,14 @@ type RoomState = {
 };
 
 /* ========================= Local fallback store ========================= */
-type GlobalWithStore = typeof globalThis & { __NOF_STORE__?: Map<string, { version: number; state: RoomState }> };
+type GlobalWithStore = typeof globalThis & {
+  __NOF_STORE__?: Map<string, { version: number; state: RoomState }>;
+};
 const gs = globalThis as GlobalWithStore;
 if (!gs.__NOF_STORE__) gs.__NOF_STORE__ = new Map();
 
-/* ========================= Persistence (DB + local) ========================= */
-type RoomRow = { id: string; version: number; state_json: string };
+/* ========================= Persistence ========================= */
+type RoomRow = QueryResultRow & { id: string; version: number; state_json: any };
 
 function freshRoom(id: string): RoomState {
   return {
@@ -150,22 +111,26 @@ function freshRoom(id: string): RoomState {
 async function loadRoom(roomId: string): Promise<{ state: RoomState; version: number }> {
   const id = roomId.toUpperCase();
 
-  if (DB_ON && pool) {
-    const [rows] = await pool.query<mysql.RowDataPacket[]>(
-      "SELECT id, version, state_json FROM rooms WHERE id = ? LIMIT 1",
-      [id],
-    );
-    const row = rows[0] as RoomRow | undefined;
-    if (row) {
-      const state = JSON.parse(row.state_json) as RoomState;
-      return { state, version: Number(row.version) };
+  if (DB_ON) {
+    try {
+      const row = await queryOne<RoomRow>(
+        "select id, version, state_json from public.rooms where id = $1 limit 1",
+        [id]
+      );
+      if (row) {
+        return { state: row.state_json as RoomState, version: Number(row.version) };
+      }
+      const state = freshRoom(id);
+      await query(
+        `insert into public.rooms (id, version, state_json)
+         values ($1, 1, $2)
+         on conflict (id) do nothing`,
+        [id, state]
+      );
+      return { state, version: 1 };
+    } catch {
+      // ตกมาใช้ local ถ้า DB ล้ม
     }
-    const state = freshRoom(id);
-    await pool.query("INSERT INTO rooms (id, version, state_json) VALUES (?, 1, ?)", [
-      id,
-      JSON.stringify(state),
-    ]);
-    return { state, version: 1 };
   }
 
   const local = gs.__NOF_STORE__!.get(id);
@@ -175,23 +140,38 @@ async function loadRoom(roomId: string): Promise<{ state: RoomState; version: nu
   return { state, version: 1 };
 }
 
-async function saveRoom(roomId: string, nextState: RoomState, prevVersion: number, retry = 0): Promise<number> {
+async function saveRoom(
+  roomId: string,
+  nextState: RoomState,
+  prevVersion: number,
+  retry = 0
+): Promise<number> {
   const id = roomId.toUpperCase();
 
-  if (DB_ON && pool) {
-    const [res] = await pool.query<mysql.ResultSetHeader>(
-      "UPDATE rooms SET state_json = ?, version = version + 1, updated_at = NOW() WHERE id = ? AND version = ?",
-      [JSON.stringify(nextState), id, prevVersion],
-    );
-    if (res.affectedRows === 0) {
+  if (DB_ON) {
+    try {
+      // optimistic concurrency
+      const updated = await query<{ version: number }>(
+        `update public.rooms
+           set state_json = $2, version = version + 1, updated_at = now()
+         where id = $1 and version = $3
+         returning version`,
+        [id, nextState, prevVersion]
+      );
+      if (updated.length > 0) return Number(updated[0].version);
+
       if (retry >= 2) throw new Error("Conflict: room updated concurrently");
-      const { version } = await loadRoom(id);
-      return saveRoom(id, nextState, version, retry + 1);
+      const cur = await queryOne<{ version: number }>(
+        `select version from public.rooms where id = $1`,
+        [id]
+      );
+      const curVer = Number(cur?.version ?? 1);
+      return saveRoom(id, nextState, curVer, retry + 1);
+    } catch {
+      // ตกมาใช้ local ถ้า DB ล้ม
     }
-    return prevVersion + 1;
   }
 
-  // local
   const cur = gs.__NOF_STORE__!.get(id);
   const curVer = cur?.version ?? 1;
   if (cur && curVer !== prevVersion) {
@@ -275,29 +255,54 @@ function spendElement(poolD: DicePool, el: ElementKind, n: number): boolean {
   return true;
 }
 
-/* ========================= DB: users/decks (optional) ========================= */
-type UserRow = { id: number; username?: string | null };
-async function qOne<T>(sql: string, params: (string | number | null | undefined)[] = []): Promise<T | null> {
-  if (!pool) return null;
-  const [rows] = await pool.query<mysql.RowDataPacket[]>(sql, params);
-  const first = rows[0] as unknown as T | undefined;
-  return first ?? null;
+/* ========================= DB users/decks (optional) ========================= */
+type UserRow = QueryResultRow & { id: number; username?: string | null };
+
+async function qOne<T extends QueryResultRow>(
+  sql: string,
+  params: unknown[] = []
+): Promise<T | null> {
+  if (!DB_ON) return null;
+  try {
+    const row = await queryOne<T>(sql, params);
+    return row ?? null;
+  } catch {
+    return null;
+  }
 }
-async function findUserRowByAny(key: string, display?: string | null): Promise<UserRow | null> {
-  if (!DB_ON || !pool) return null;
+
+async function findUserRowByAny(
+  key: string,
+  display?: string | null
+): Promise<UserRow | null> {
+  if (!DB_ON) return null;
+
+  // discord_id เป็นตัวเลขยาว?
   if (/^\d{6,}$/.test(key)) {
-    const u = await qOne<UserRow>("SELECT id, username FROM users WHERE discord_id = ? LIMIT 1", [key]);
+    const u = await qOne<UserRow>(
+      "select id, username from public.users where discord_id = $1 limit 1",
+      [key]
+    );
     if (u) return u;
   }
+  // อีเมล?
   if (/@/.test(key)) {
-    const u = await qOne<UserRow>("SELECT id, username FROM users WHERE email = ? LIMIT 1", [key]);
+    const u = await qOne<UserRow>(
+      "select id, username from public.users where email = $1 limit 1",
+      [key]
+    );
     if (u) return u;
   }
+  // username
   const name = display ?? key;
-  const u = await qOne<UserRow>("SELECT id, username FROM users WHERE username = ? LIMIT 1", [name]);
+  const u = await qOne<UserRow>(
+    "select id, username from public.users where username = $1 limit 1",
+    [name]
+  );
   return u ?? null;
 }
-type DeckRow = {
+
+type DeckRow = QueryResultRow & {
   id: number;
   user_id: number;
   name: string | null;
@@ -306,8 +311,13 @@ type DeckRow = {
   card_char3?: number | null;
 } & { [K in `card${number}`]?: number | null };
 
-async function loadDeckFromDB(userId: number): Promise<{ chars: string[]; deck: string[] } | null> {
-  const row = await qOne<DeckRow>("SELECT * FROM decks WHERE user_id = ? LIMIT 1", [userId]);
+async function loadDeckFromDB(
+  userId: number
+): Promise<{ chars: string[]; deck: string[] } | null> {
+  const row = await qOne<DeckRow>(
+    "select * from public.decks where user_id = $1 limit 1",
+    [userId]
+  );
   if (!row) return null;
 
   const charIdToCode = new Map<number, string>();
@@ -324,7 +334,7 @@ async function loadDeckFromDB(userId: number): Promise<{ chars: string[]; deck: 
 
   const deck: string[] = [];
   for (let i = 1; i <= 20; i++) {
-    const val = row[`card${i}`];
+    const val = (row as any)[`card${i}`] as number | null | undefined;
     if (val == null) continue;
     const id = Number(val);
     const code = supById.get(id) ?? evtById.get(id) ?? null;
@@ -421,13 +431,19 @@ function stateForClient(room: RoomState, currentUserId?: string) {
   };
 }
 
-async function userHasDeck(room: RoomState, side: Side): Promise<{ has: boolean; display?: string | null }> {
-  if (!DB_ON || !pool) return { has: true, display: room.players[side]?.name ?? null };
+async function userHasDeck(
+  room: RoomState,
+  side: Side
+): Promise<{ has: boolean; display?: string | null }> {
+  if (!DB_ON) return { has: true, display: room.players[side]?.name ?? null };
   const p = room.players[side];
   if (!p) return { has: false, display: null };
   const u = await findUserRowByAny(p.userId, p.name ?? null);
   if (!u) return { has: false, display: p.name ?? null };
-  const d = await qOne<{ id: number }>("SELECT id FROM decks WHERE user_id = ? LIMIT 1", [u.id]);
+  const d = await qOne<{ id: number }>(
+    "select id from public.decks where user_id = $1 limit 1",
+    [u.id]
+  );
   return { has: !!d, display: p.name ?? null };
 }
 async function checkMissingDecks(room: RoomState): Promise<string[]> {
@@ -440,7 +456,7 @@ async function checkMissingDecks(room: RoomState): Promise<string[]> {
 }
 
 function createRoomOp(room: RoomState, user: PlayerInfo) {
-  if (!room.players.p1 && !room.players.p2) room.players.p1 = user; // host = p1
+  if (!room.players.p1 && !room.players.p2) room.players.p1 = user;
 }
 function joinRoomOp(room: RoomState, user: PlayerInfo) {
   const s = sideOf(room, user.userId);
@@ -468,7 +484,7 @@ function ackCoin(room: RoomState, userId: string) {
   if (!s) return;
   if (!room.coin.decided) return;
   room.coinAck[s] = true;
-  if (room.coinAck.p1 && room.coinAck.p2) room.coin.decided = false; // ปิด overlay ถาวร
+  if (room.coinAck.p1 && room.coinAck.p2) room.coin.decided = false;
 }
 function endTurn(room: RoomState, userId: string) {
   const s = sideOf(room, userId);
@@ -545,7 +561,13 @@ function passTurnAfterCombat(room: RoomState, actor: Side) {
   room.turn = foe;
   room.phaseActor = foe;
 }
-function combat(room: RoomState, userId: string, attackerIndex: number, targetIndex: number | null, mode: "basic" | "skill" | "ult") {
+function combat(
+  room: RoomState,
+  userId: string,
+  attackerIndex: number,
+  targetIndex: number | null,
+  mode: "basic" | "skill" | "ult"
+) {
   const s = sideOf(room, userId);
   if (!s) throw new Error("Not in room");
   if (room.phaseActor !== s) return;
@@ -591,20 +613,15 @@ function combat(room: RoomState, userId: string, attackerIndex: number, targetIn
   passTurnAfterCombat(room, s);
 }
 
-/* ========================= Body parser (รับได้หลายแบบ) ========================= */
+/* ========================= tolerant body parser ========================= */
 async function parseBody(req: Request): Promise<Record<string, unknown>> {
-  // 1) JSON ปกติ
   try {
     const ctype = req.headers.get("content-type") || "";
     if (ctype.includes("application/json")) {
       const j = await req.json();
       if (j && typeof j === "object") return j as Record<string, unknown>;
     }
-  } catch {
-    // fallthrough
-  }
-
-  // 2) form-urlencoded
+  } catch {}
   try {
     const ctype = req.headers.get("content-type") || "";
     if (ctype.includes("application/x-www-form-urlencoded")) {
@@ -614,31 +631,20 @@ async function parseBody(req: Request): Promise<Record<string, unknown>> {
       p.forEach((v, k) => (obj[k] = v));
       return obj;
     }
-  } catch {
-    // fallthrough
-  }
-
-  // 3) text/plain ที่พอจะ parse ได้เป็น JSON
+  } catch {}
   try {
     const txt = await req.text();
     if (txt && txt.trim().startsWith("{")) {
       const j = JSON.parse(txt);
       if (j && typeof j === "object") return j as Record<string, unknown>;
     }
-  } catch {
-    // fallthrough
-  }
-
-  // 4) query string fallback (?action=...&roomId=...)
+  } catch {}
   try {
     const u = new URL(req.url);
     const obj: Record<string, unknown> = {};
     u.searchParams.forEach((v, k) => (obj[k] = v));
     if (Object.keys(obj).length > 0) return obj;
-  } catch {
-    // ignore
-  }
-
+  } catch {}
   return {};
 }
 
@@ -665,28 +671,32 @@ export async function POST(req: Request) {
     if (!roomId && !noRoomNeeded.has(action)) throw new Error("Missing roomId");
 
     if (action === "hello") {
-      return NextResponse.json({ ok: true, time: Date.now(), version: 1, db: DB_ON ? "on" : "off" });
+      return NextResponse.json({
+        ok: true,
+        time: Date.now(),
+        version: 1,
+        db: DB_ON ? "on" : "off",
+      });
     }
 
+    // ✅ ไม่บังคับมี user
     if (action === "createRoom") {
       const id = roomId;
       const { state, version } = await loadRoom(id);
-      if (!body.user?.userId) throw new Error("Missing user");
-      createRoomOp(state, body.user);
+      if (body.user?.userId) createRoomOp(state, body.user);
       await saveRoom(id, state, version);
       return NextResponse.json({ ok: true, roomId: id });
     }
 
+    // ✅ ไม่บังคับมี user
     if (action === "joinRoom") {
       const id = roomId;
       const { state, version } = await loadRoom(id);
-      if (!body.user?.userId) throw new Error("Missing user");
-      joinRoomOp(state, body.user);
+      if (body.user?.userId) joinRoomOp(state, body.user);
       await saveRoom(id, state, version);
       return NextResponse.json({ ok: true, roomId: id });
     }
 
-    // load room for the rest
     const { state: room, version: ver } = await loadRoom(roomId);
 
     switch (action) {
@@ -694,7 +704,6 @@ export async function POST(req: Request) {
         const uid = String(body.userId || "");
         return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
       }
-
       case "ready": {
         const uid = String((body.user as PlayerInfo)?.userId || body.userId || "");
         if (!uid) throw new Error("Missing userId");
@@ -707,28 +716,24 @@ export async function POST(req: Request) {
         await saveRoom(roomId, room, ver);
         return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
       }
-
       case "ackCoin": {
         const uid = String((body.user as PlayerInfo)?.userId || body.userId || "");
         ackCoin(room, uid);
         await saveRoom(roomId, room, ver);
         return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
       }
-
       case "endTurn": {
         const uid = String((body.user as PlayerInfo)?.userId || body.userId || "");
         endTurn(room, uid);
         await saveRoom(roomId, room, ver);
         return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
       }
-
       case "endPhase": {
         const uid = String((body.user as PlayerInfo)?.userId || body.userId || "");
         endPhase(room, uid);
         await saveRoom(roomId, room, ver);
         return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
       }
-
       case "playCard": {
         const uid = String((body.user as PlayerInfo)?.userId || body.userId || "");
         const handIndex = Number(body.index ?? 0);
@@ -736,7 +741,6 @@ export async function POST(req: Request) {
         await saveRoom(roomId, room, ver);
         return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
       }
-
       case "discardForInfinite": {
         const uid = String((body.user as PlayerInfo)?.userId || body.userId || "");
         const handIndex = Number(body.index ?? 0);
@@ -744,7 +748,6 @@ export async function POST(req: Request) {
         await saveRoom(roomId, room, ver);
         return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
       }
-
       case "combat": {
         const uid = String((body.user as PlayerInfo)?.userId || body.userId || "");
         const attacker = Number(body.attacker ?? 0);
@@ -754,7 +757,6 @@ export async function POST(req: Request) {
         await saveRoom(roomId, room, ver);
         return NextResponse.json({ ok: true, state: stateForClient(room, uid) });
       }
-
       default:
         throw new Error(`Unknown action: ${action}`);
     }

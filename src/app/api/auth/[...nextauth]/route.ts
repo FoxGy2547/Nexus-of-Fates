@@ -1,8 +1,7 @@
+// src/app/api/auth/[...nextauth]/route.ts
 import NextAuth, { type NextAuthOptions } from "next-auth";
 import DiscordProvider from "next-auth/providers/discord";
-import { getPool } from "@/lib/db";
-import type { Pool } from "mysql2/promise";
-import type { RowDataPacket } from "mysql2";
+import { queryOne } from "@/lib/db";
 
 /** Next.js route config */
 export const runtime = "nodejs";
@@ -28,16 +27,17 @@ declare module "next-auth" {
 }
 
 /** ---- DB row types ---- */
-interface UserIdRow extends RowDataPacket {
-  id: number;
-}
+type UserIdRow = { id: number };
 
-/** Discord profile fields weสนใจ (หลีกเลี่ยง any) */
+/** Discord profile fields ที่ใช้ (ให้ type ชัด ๆ) */
 type MaybeDiscordProfile = Partial<
-  Record<"email" | "global_name" | "username" | "name" | "image_url" | "avatar", string>
+  Record<
+    "email" | "global_name" | "username" | "name" | "image_url" | "avatar",
+    string
+  >
 >;
 
-/** ==== NextAuth options (no any) ==== */
+/** ==== NextAuth options (ใช้ JWT, ไม่ผูก Adapter DB) ==== */
 const authOptions: NextAuthOptions = {
   session: { strategy: "jwt" },
   providers: [
@@ -49,17 +49,15 @@ const authOptions: NextAuthOptions = {
   ],
   callbacks: {
     async jwt({ token, account, user, profile }) {
-      // ระบุ discord id (ถ้า login ด้วย discord)
+      // discord id จาก provider หรือใช้ sub เป็น fallback
       const discordId: string =
         account?.provider === "discord"
           ? account.providerAccountId
           : (token.sub ?? "");
 
-      // profile ที่ได้จากผู้ให้บริการ (typed, not any)
       const p: MaybeDiscordProfile | null =
         (profile ?? null) as MaybeDiscordProfile | null;
 
-      // รวมแหล่งข้อมูลแบบปลอดภัย ไม่ใช้ any
       const email: string | null = token.email ?? user?.email ?? p?.email ?? null;
       const username: string | null =
         token.name ??
@@ -73,28 +71,22 @@ const authOptions: NextAuthOptions = {
 
       let uid: string = discordId;
 
-      // บันทึก/อัปเดตผู้ใช้ในฐานข้อมูล (ไม่ใช้ any)
+      // ⤵️ upsert ผู้ใช้ลง Postgres (Supabase)
       try {
-        const pool: Pool = await getPool();
-
-        await pool.query(
-          `INSERT INTO users (discord_id, email, username, avatar)
-           VALUES (?, ?, ?, ?)
-           ON DUPLICATE KEY UPDATE
-             email = VALUES(email),
-             username = VALUES(username),
-             avatar = VALUES(avatar)`,
+        const row = await queryOne<UserIdRow>(
+          `
+          insert into public.users (discord_id, email, username, avatar)
+          values ($1, $2, $3, $4)
+          on conflict (discord_id) do update
+             set email = excluded.email,
+                 username = excluded.username,
+                 avatar = excluded.avatar
+          returning id;
+          `,
           [discordId, email, username, avatar]
         );
-
-        const [rows] = await pool.execute<UserIdRow[]>(
-          "SELECT id FROM users WHERE discord_id = ? LIMIT 1",
-          [discordId]
-        );
-        if (Array.isArray(rows) && rows.length > 0) {
-          uid = String(rows[0].id);
-        }
-      } catch (err: unknown) {
+        if (row?.id) uid = String(row.id);
+      } catch (err) {
         console.warn("[nextauth] DB skipped:", err);
       }
 

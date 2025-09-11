@@ -1,82 +1,92 @@
 // src/lib/db.ts
-import mysql from "mysql2/promise";
+import { Pool, type PoolClient, type QueryResultRow } from "pg";
+
+/** สร้าง connectionString จาก ENV ที่มี (รองรับทั้ง DATABASE_URL หรือ DB_*) */
+function buildConnectionString(): string {
+  if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
+
+  const host = process.env.DB_HOST!;
+  const port = process.env.DB_PORT ?? "5432";
+  const db   = process.env.DB_NAME ?? "postgres";
+  const user = encodeURIComponent(process.env.DB_USER ?? "");
+  const pass = encodeURIComponent(process.env.DB_PASS ?? "");
+  // ใช้ sslmode=require ให้เข้ากับ Vercel/Supabase Pooler
+  return `postgresql://${user}:${pass}@${host}:${port}/${db}?sslmode=require`;
+}
+
+/** กันสร้าง Pool ซ้ำ ๆ บน serverless */
+declare global {
+  // eslint-disable-next-line no-var
+  var __pgPool: Pool | undefined;
+}
+
+const pool: Pool =
+  global.__pgPool ??
+  new Pool({
+    connectionString: buildConnectionString(),
+    ssl: { rejectUnauthorized: false }, // กัน cert งอแงบนบางเครือข่าย
+    max: 1, // ใช้คู่กับ pgbouncer=true/Pooler จะดีมาก
+  });
+
+if (!global.__pgPool) global.__pgPool = pool;
+
+export { pool };
+
+/** query หลายแถว (typed) */
+export async function query<T extends QueryResultRow = QueryResultRow>(
+  sql: string,
+  params?: unknown[]
+): Promise<T[]> {
+  const res = await pool.query<T>(sql, params as any[]);
+  return res.rows;
+}
+
+/** query แถวเดียว (typed) */
+export async function queryOne<T extends QueryResultRow = QueryResultRow>(
+  sql: string,
+  params?: unknown[]
+): Promise<T | null> {
+  const res = await pool.query<T>(sql, params as any[]);
+  return res.rows[0] ?? null;
+}
 
 /**
- * Augment globalThis ให้รู้จัก __dbPool โดยไม่ใช้ any
- * - ใช้ intersection type ตอนสร้างตัวแปร g
- * - ไม่ต้องใช้ // eslint-disable หรือ var พิเศษ
+ * withRoomLock: ล็อกห้องแบบ serialize ด้วย advisory lock
+ * ใช้ pg_try_advisory_lock(hashtext(roomId), 0) เพื่อไม่ block และมี timeout
  */
-type GlobalWithDb = typeof globalThis & { __dbPool?: mysql.Pool };
-const g: GlobalWithDb = globalThis as GlobalWithDb;
-
-export function getPool(): mysql.Pool {
-  if (!g.__dbPool) {
-    g.__dbPool = mysql.createPool({
-      host: process.env.DB_HOST!,
-      user: process.env.DB_USER!,
-      password: process.env.DB_PASS!,
-      database: process.env.DB_NAME!,
-      waitForConnections: true,
-      connectionLimit: 1, // 1 ต่ออินสแตนซ์ กันชน max_user_connections
-      maxIdle: 1,
-      queueLimit: 0,
-    });
-  }
-  return g.__dbPool;
-}
-
-/** ชนิดผลลัพธ์ของ mysql2 แบบปรับแต่งได้ด้วย generic T */
-export type QResult<
-  T extends
-    | mysql.RowDataPacket[]
-    | mysql.RowDataPacket[][]
-    | mysql.OkPacket
-    | mysql.OkPacket[]
-    | mysql.ResultSetHeader = mysql.RowDataPacket[]
-> = [T, mysql.FieldPacket[]];
-
-/** query helper ที่พิมพ์ type ถูกต้อง */
-export async function q<
-  T extends
-    | mysql.RowDataPacket[]
-    | mysql.RowDataPacket[][]
-    | mysql.OkPacket
-    | mysql.OkPacket[]
-    | mysql.ResultSetHeader = mysql.RowDataPacket[]
->(
-  conn: mysql.PoolConnection,
-  sql: string,
-  params: (string | number | null | undefined)[] = [],
-): Promise<QResult<T>> {
-  return conn.query<T>(sql, params);
-}
-
-/** รันโค้ดภายใต้ lock ต่อห้องด้วย MySQL GET_LOCK (serialize ต่อ room) */
 export async function withRoomLock<T>(
   roomId: string,
-  fn: (conn: mysql.PoolConnection) => Promise<T>,
-  timeoutSec = 5,
+  fn: (client: PoolClient) => Promise<T>,
+  timeoutMs = 5000,
+  retryEveryMs = 100
 ): Promise<T> {
-  const pool = getPool();
-  const conn = await pool.getConnection();
-  try {
-    const [rows] = await q<mysql.RowDataPacket[]>(
-      conn,
-      "SELECT GET_LOCK(?, ?)",
-      [`room:${roomId}`, timeoutSec],
-    );
-    // GET_LOCK → 1 = locked, 0 = timeout, NULL = error
-    const first = rows[0] as mysql.RowDataPacket;
-    const locked = (first[Object.keys(first)[0]] as number | null) === 1;
-    if (!locked) throw new Error("LOCK_TIMEOUT");
+  const client = await pool.connect();
+  const started = Date.now();
 
-    return await fn(conn);
+  try {
+    // พยายามล็อกจนกว่าจะได้หรือครบ timeout
+    while (true) {
+      // ใช้ key แบบ (int,int) = (hashtext(roomId), 0)
+      const r = await client.query<{ ok: boolean }>(
+        "select pg_try_advisory_lock(hashtext($1), 0) as ok",
+        [roomId]
+      );
+      if (r.rows[0]?.ok) break;
+
+      if (Date.now() - started > timeoutMs) {
+        throw new Error("LOCK_TIMEOUT");
+      }
+      await new Promise((res) => setTimeout(res, retryEveryMs));
+    }
+
+    // ทำงานภายใต้ล็อก
+    return await fn(client);
   } finally {
     try {
-      await q(conn, "DO RELEASE_LOCK(?)", [`room:${roomId}`]);
+      await client.query("select pg_advisory_unlock(hashtext($1), 0)", [roomId]);
     } catch {
       /* noop */
     }
-    conn.release();
+    client.release();
   }
 }
