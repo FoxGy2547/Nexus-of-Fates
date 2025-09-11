@@ -8,35 +8,37 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  // ไม่ต้อง authOptions
-  const session = (await getServerSession()) as Session | null;
+  try {
+    const session = (await getServerSession()) as Session | null;
 
-  if (!session?.user?.email) {
-    // ยังไม่ล็อกอิน หรือ provider ไม่ส่งอีเมลมา
-    return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
+    if (!session?.user?.email) {
+      return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
+    }
+
+    const pool = getPool();
+    const { rows } = await pool.query(
+      `SELECT id, username, email, discord_id
+         FROM users
+        WHERE email = $1
+        ORDER BY created_at DESC
+        LIMIT 1`,
+      [session.user.email]
+    );
+
+    if (rows.length === 0) {
+      return NextResponse.json({ error: "user not found in DB" }, { status: 404 });
+    }
+
+    const u = rows[0];
+    return NextResponse.json({
+      userId: Number(u.id),
+      username: u.username,
+      email: u.email,
+      discordId: u.discord_id,
+    });
+  } catch (err) {
+    // อย่าโยน HTML — ตอบ JSON ให้หน้า client parse ได้เสมอ
+    const msg = err instanceof Error ? err.message : "internal error";
+    return NextResponse.json({ error: `me route failed: ${msg}` }, { status: 500 });
   }
-
-  const email = session.user.email;
-
-  const pool = getPool();
-  const { rows } = await pool.query(
-    `SELECT id, username, email, discord_id
-       FROM users
-      WHERE email = $1
-      ORDER BY created_at DESC
-      LIMIT 1`,
-    [email]
-  );
-
-  if (rows.length === 0) {
-    return NextResponse.json({ error: "user not found in DB" }, { status: 404 });
-  }
-
-  const u = rows[0];
-  return NextResponse.json({
-    userId: Number(u.id),
-    username: u.username,
-    email: u.email,
-    discordId: u.discord_id,
-  });
 }

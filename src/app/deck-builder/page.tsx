@@ -1,4 +1,3 @@
-// src/app/deck-builder/page.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -10,27 +9,42 @@ type Item = {
   qty: number;
 };
 
+async function fetchJSON<T = any>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(url, { cache: "no-store", ...init });
+  const text = await res.text().catch(() => "");
+  let data: any = null;
+  if (text) {
+    try { data = JSON.parse(text); } 
+    catch {
+      throw new Error(`Bad JSON from ${url}: ${text.slice(0, 120)}`);
+    }
+  }
+  if (!res.ok) {
+    const msg = (data && (data.error || data.message)) || text || res.statusText || "Request failed";
+    throw new Error(msg);
+  }
+  return (data ?? {}) as T;
+}
+
 export default function DeckBuilderPage() {
   const [meId, setMeId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [items, setItems] = useState<Item[]>([]);
   const [name, setName] = useState("My Deck");
 
-  // selections
   const [chars, setChars] = useState<number[]>([]);
-  const [others, setOthers] = useState<Record<number, number>>({}); // cardId -> count
+  const [others, setOthers] = useState<Record<number, number>>({});
   const totalOthers = useMemo(() => Object.values(others).reduce((a, b) => a + b, 0), [others]);
 
-  // โหลด me → inventory
   useEffect(() => {
     (async () => {
+      setLoading(true);
       try {
-        const me = await fetch("/api/me", { cache: "no-store" }).then(r => r.json());
-        if (!me?.userId) throw new Error("me not found");
+        const me = await fetchJSON<{ userId: number }>("/api/me");
         setMeId(Number(me.userId));
 
-        const inv = await fetch(`/api/inventory?userId=${me.userId}`, { cache: "no-store" }).then(r => r.json());
-        setItems((inv?.items ?? []) as Item[]);
+        const inv = await fetchJSON<{ items: Item[] }>(`/api/inventory?userId=${me.userId}`);
+        setItems(inv.items ?? []);
       } catch (e) {
         alert((e as Error).message || "load failed");
       } finally {
@@ -62,16 +76,21 @@ export default function DeckBuilderPage() {
 
   async function save() {
     if (!meId) return alert("no user");
-    const payload = {
-      userId: meId,
-      name,
-      characters: chars,
-      cards: Object.entries(others).map(([k, v]) => ({ cardId: Number(k), count: v })),
-    };
-    const res = await fetch("/api/deck", { method: "POST", body: JSON.stringify(payload) });
-    const json = await res.json();
-    if (json?.ok) alert(`Saved deck #${json.deckId}`);
-    else alert(`Error: ${json?.error ?? "save failed"}`);
+    try {
+      const payload = {
+        userId: meId,
+        name,
+        characters: chars,
+        cards: Object.entries(others).map(([k, v]) => ({ cardId: Number(k), count: v })),
+      };
+      const res = await fetchJSON<{ ok: boolean; deckId: number }>("/api/deck", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      alert(`Saved deck #${res.deckId}`);
+    } catch (e) {
+      alert((e as Error).message || "save failed");
+    }
   }
 
   return (
