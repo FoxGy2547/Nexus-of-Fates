@@ -209,6 +209,19 @@ export default function Home() {
           </div>
         </div>
       </section>
+      {/* deck builder */}
+      <section className="rounded-xl border border-white/10 p-4 bg-black/20">
+        <div className="font-semibold mb-2">Deck Builder</div>
+        <p className="text-sm opacity-70 mb-3">
+          จัดเด็คของคุณ: เลือกตัวละครสูงสุด 3 ใบ และการ์ดเสริม/อีเวนต์รวม 20 ใบ
+        </p>
+        <button
+          className="px-4 py-2 rounded bg-purple-600 hover:bg-purple-500"
+          onClick={() => router.push("/deck-builder")}
+        >
+          Open Deck Builder
+        </button>
+      </section>
     </main>
   );
 }

@@ -371,11 +371,31 @@ function createRoomOp(room: RoomState, user: PlayerInfo) {
 }
 function joinRoomOp(room: RoomState, user: PlayerInfo) {
   const s = sideOf(room, user.userId);
-  if (s) { room.players[s] = user; return; }
+  if (s) {
+    // เคยอยู่แล้ว -> อัปเดตชื่อ/รูป
+    room.players[s] = user;
+    return;
+  }
+
+  // จัดให้นั่งที่ว่างก่อน
   if (!room.players.p1) { room.players.p1 = user; return; }
   if (!room.players.p2) { room.players.p2 = user; return; }
+
+  // --- ทั้งสองที่เต็ม แต่ยังอยู่ใน lobby -> ให้ยึด P2 ถ้าเขายังไม่ ready ---
+  if (room.mode === "lobby" && room.ready.p2 === false) {
+    room.players.p2 = user;    // takeover เก้าอี้ P2
+    return;
+  }
+
+  // ถ้าอยากเผื่อยึด P1 ด้วย (ถ้า P1 ยังไม่ ready) ก็ปลดบรรทัดข้างล่าง
+  // if (room.mode === "lobby" && room.ready.p1 === false) {
+  //   room.players.p1 = user;
+  //   return;
+  // }
+
   throw new Error("Room is full");
 }
+
 function markReady(room: RoomState, userId: string) {
   const s = sideOf(room, userId);
   if (!s) throw new Error("Not in room");
