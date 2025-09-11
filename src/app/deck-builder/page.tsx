@@ -43,11 +43,7 @@ type CardsData = {
 };
 const cardsData = cardsDataJson as CardsData;
 
-type Inventory = {
-  userId: number;
-  chars: Record<number, number>;
-  others: Record<number, number>;
-};
+type Inventory = { userId: number; chars: Record<number, number>; others: Record<number, number> };
 
 type SaveBody = {
   userId: number;
@@ -57,14 +53,7 @@ type SaveBody = {
 };
 
 type DeckResp =
-  | {
-      ok: true;
-      deck: {
-        name: string;
-        characters: number[];
-        cards: { cardId: number; count: number }[];
-      };
-    }
+  | { ok: true; deck: { name: string; characters: number[]; cards: { cardId: number; count: number }[] } }
   | { ok: true; deck?: undefined };
 
 type MeResp = { ok: boolean; user?: { id: number } };
@@ -94,13 +83,38 @@ async function postJSON<T>(url: string, body: unknown): Promise<T> {
   return (txt ? JSON.parse(txt) : ({} as T)) as T;
 }
 
-/** แปลง payload inventory ให้เป็นทรงมาตรฐาน {chars, others} */
+/** แปลง payload inventory เป็น {chars, others}
+ *  รองรับ 2 รูปแบบ:
+ *   A) row: { user_id, char_1..char_12, card_1..card_3 }
+ *   B) items: [{ cardId, kind: "character"|"support"|"event", qty }]
+ *      - สำหรับ support/event จะเป็น cardId = 101..103 → map กลับเป็น 1..3
+ */
 function normalizeInventory(raw: unknown): Inventory {
   const empty: Inventory = { userId: 0, chars: {}, others: {} };
   if (!raw || typeof raw !== "object") return empty;
 
-  // กรณีส่งมารายการเดียว (row เดียว)
   const top = raw as Record<string, unknown>;
+
+  // รูปแบบ B: items
+  if (Array.isArray(top.items)) {
+    const inv: Inventory = { userId: Number(top.userId ?? 0) || 0, chars: {}, others: {} };
+    for (const it of top.items as Array<Record<string, unknown>>) {
+      const id = Number(it.cardId ?? 0);
+      const qty = Number(it.qty ?? 0);
+      const kind = String(it.kind ?? "");
+      if (!Number.isFinite(id) || qty <= 0) continue;
+      if (kind === "character") {
+        inv.chars[id] = qty;
+      } else {
+        // 101/102/103 -> 1/2/3
+        const slot = id >= 101 ? id - 100 : id;
+        inv.others[slot] = qty;
+      }
+    }
+    return inv;
+  }
+
+  // รูปแบบ A: row เดี่ยว
   const row: Record<string, unknown> =
     typeof top.row === "object" && top.row ? (top.row as Record<string, unknown>) : top;
 
@@ -110,7 +124,7 @@ function normalizeInventory(raw: unknown): Inventory {
     others: {},
   };
 
-  // ถ้ามีทรงมาตรฐานแล้ว ก็ใช้เลย
+  // ถ้ามีทรงมาตรฐานอยู่แล้ว
   if (typeof row.chars === "object" && row.chars && !Array.isArray(row.chars)) {
     const c = row.chars as Record<string, unknown>;
     for (const [k, v] of Object.entries(c)) inv.chars[Number(k)] = Number(v ?? 0);
@@ -120,7 +134,7 @@ function normalizeInventory(raw: unknown): Inventory {
     for (const [k, v] of Object.entries(o)) inv.others[Number(k)] = Number(v ?? 0);
   }
 
-  // รองรับคอลัมน์แบบ char_1 … card_1 …
+  // map char_*/card_* → inv
   for (const [k, v] of Object.entries(row)) {
     if (typeof v === "number" || typeof v === "string") {
       const mChar = /^char_(\d+)$/.exec(k);
@@ -146,29 +160,13 @@ const CHAR_CARDS = cardsData.characters.map((c) => ({
   art: c.art,
 }));
 const OTHER_CARDS = [
-  ...cardsData.supports.map((s) => ({
-    id: s.id,
-    code: s.code,
-    name: s.name,
-    art: s.art,
-    kind: "support" as const,
-  })),
-  ...cardsData.events.map((e) => ({
-    id: e.id,
-    code: e.code,
-    name: e.name,
-    art: e.art,
-    kind: "event" as const,
-  })),
+  ...cardsData.supports.map((s) => ({ id: s.id, code: s.code, name: s.name, art: s.art, kind: "support" as const })),
+  ...cardsData.events.map((e) => ({ id: e.id, code: e.code, name: e.name, art: e.art, kind: "event" as const })),
 ];
 
 /* ================ UI bits ================ */
 function Badge({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="px-1.5 py-0.5 rounded text-[11px] bg-black/70 text-white pointer-events-none">
-      {children}
-    </span>
-  );
+  return <span className="px-1.5 py-0.5 rounded text-[11px] bg-black/70 text-white pointer-events-none">{children}</span>;
 }
 function PortraitCardImage({ src, alt }: { src: string; alt: string }) {
   return (
@@ -188,14 +186,11 @@ function PageInner() {
   const [inv, setInv] = useState<Inventory | null>(null);
   const [selChars, setSelChars] = useState<number[]>([]);
   const [selOthers, setSelOthers] = useState<Record<number, number>>({});
-  const othersTotal = useMemo(
-    () => Object.values(selOthers).reduce((a, b) => a + b, 0),
-    [selOthers]
-  );
+  const othersTotal = useMemo(() => Object.values(selOthers).reduce((a, b) => a + b, 0), [selOthers]);
 
-  // 0) if ไม่มี ?userId= ให้ลอง /api/me
+  // ถ้าไม่มี ?userId= ลอง /api/me
   useEffect(() => {
-    if (qsUserId) return; // ระบุมาแล้ว
+    if (qsUserId) return;
     (async () => {
       try {
         const me = await getJSON<MeResp>("/api/me");
@@ -207,12 +202,12 @@ function PageInner() {
     })();
   }, [qsUserId]);
 
-  // sync ถ้ามี ?userId=
+  // sync ?userId=
   useEffect(() => {
     if (qsUserId && qsUserId !== userId) setUserId(qsUserId);
   }, [qsUserId, userId]);
 
-  // 1) โหลด inventory + deck พร้อมกัน → แล้วพรีฟิล
+  // โหลด inventory + deck → พรีฟิล
   useEffect(() => {
     if (!userId) return;
     (async () => {
@@ -231,7 +226,6 @@ function PageInner() {
           for (const it of deckResp.deck.cards ?? []) rec[it.cardId] = it.count;
           setSelOthers(rec);
         } else {
-          // ไม่มีเด็ค → เคลียร์ค่าที่เลือกไว้
           setSelChars([]);
           setSelOthers({});
         }
@@ -241,14 +235,9 @@ function PageInner() {
     })();
   }, [userId]);
 
+  // ตัวช่วยเลือก/แก้จำนวน
   function toggleChar(id: number) {
-    setSelChars((prev) =>
-      prev.includes(id)
-        ? prev.filter((x) => x !== id)
-        : prev.length >= 3
-        ? prev
-        : [...prev, id]
-    );
+    setSelChars((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : prev.length >= 3 ? prev : [...prev, id]));
   }
   function addOther(id: number) {
     setSelOthers((prev) => ({ ...prev, [id]: Math.min(20, (prev[id] ?? 0) + 1) }));
@@ -262,20 +251,15 @@ function PageInner() {
       return next;
     });
   }
+
   async function onSave() {
-    if (!userId)
-      return alert(
-        "ไม่พบ userId (แนบ ?userId= ใน URL หรือ login เพื่อให้ระบบหาให้อัตโนมัติ)"
-      );
-    if (selChars.length === 0) return alert("เลือกตัวละครอย่างน้อย 1 ตัวก่อนนะ");
+    if (!userId) return alert("ไม่พบ userId");
+    if (selChars.length === 0) return alert("เลือกตัวละครอย่างน้อย 1 ตัว");
     const body: SaveBody = {
       userId,
       name,
       characters: selChars,
-      cards: Object.entries(selOthers).map(([id, count]) => ({
-        cardId: Number(id),
-        count: Number(count),
-      })),
+      cards: Object.entries(selOthers).map(([id, count]) => ({ cardId: Number(id), count: Number(count) })),
     };
     try {
       await postJSON("/api/deck", body);
@@ -284,6 +268,17 @@ function PageInner() {
       alert(`Save ล้มเหลว: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
+
+  // ========== FILTER: แสดงเฉพาะใบที่ "มี" ==========
+  const VISIBLE_CHAR_CARDS = useMemo(() => {
+    if (!inv) return [] as typeof CHAR_CARDS;
+    return CHAR_CARDS.filter((c) => (inv.chars?.[c.id] ?? 0) > 0);
+  }, [inv]);
+
+  const VISIBLE_OTHER_CARDS = useMemo(() => {
+    if (!inv) return [] as typeof OTHER_CARDS;
+    return OTHER_CARDS.filter((o) => (inv.others?.[o.id] ?? 0) > 0);
+  }, [inv]);
 
   return (
     <main className="min-h-screen p-6 flex flex-col gap-6">
@@ -301,13 +296,16 @@ function PageInner() {
         </button>
       </header>
 
-      {/* Characters */}
+      {/* Characters (เฉพาะที่มี) */}
       <section>
         <div className="font-semibold mb-2">Characters</div>
+
+        {!inv && <div className="opacity-70 text-sm">Loading inventory…</div>}
+
         <div className="flex flex-wrap gap-3">
-          {CHAR_CARDS.map((c) => {
-            const owned = inv?.chars?.[c.id] ?? 0; // owned จาก inventory
-            const selected = selChars.includes(c.id); // พรีฟิลจาก deck
+          {VISIBLE_CHAR_CARDS.map((c) => {
+            const owned = inv?.chars?.[c.id] ?? 0; // >0 เสมอ เพราะผ่าน filter
+            const selected = selChars.includes(c.id);
             return (
               <button
                 key={c.id}
@@ -321,36 +319,29 @@ function PageInner() {
                 <div className="absolute left-2 top-2 z-10">
                   <Badge>#{c.id}</Badge>
                 </div>
-
-                {/* แสดง owned เฉพาะ > 0 */}
-                {owned > 0 && (
-                  <div className="absolute right-2 top-2 z-10">
-                    <Badge>owned {owned}</Badge>
-                  </div>
-                )}
-
+                <div className="absolute right-2 top-2 z-10">
+                  <Badge>owned {owned}</Badge>
+                </div>
                 <div className="mt-3">
-                  <PortraitCardImage
-                    src={cardImg(c.art, "character")}
-                    alt={c.code}
-                  />
+                  <PortraitCardImage src={cardImg(c.art, "character")} alt={c.code} />
                 </div>
-                <div className="mt-2 font-medium truncate">
-                  {c.name || c.code.replaceAll("_", " ")}
-                </div>
+                <div className="mt-2 font-medium truncate">{c.name || c.code.replaceAll("_", " ")}</div>
               </button>
             );
           })}
         </div>
       </section>
 
-      {/* Supports & Events */}
+      {/* Supports & Events (เฉพาะที่มี) */}
       <section>
         <div className="font-semibold mb-2">Supports & Events</div>
+
+        {!inv && <div className="opacity-70 text-sm">Loading inventory…</div>}
+
         <div className="flex flex-wrap gap-3">
-          {OTHER_CARDS.map((o) => {
-            const owned = inv?.others?.[o.id] ?? 0; // owned จาก inventory
-            const picked = selOthers[o.id] ?? 0; // พรีฟิลจาก deck
+          {VISIBLE_OTHER_CARDS.map((o) => {
+            const owned = inv?.others?.[o.id] ?? 0; // >0 เสมอ
+            const picked = selOthers[o.id] ?? 0;
             return (
               <div
                 key={`${o.kind}-${o.id}`}
@@ -360,13 +351,9 @@ function PageInner() {
                 <div className="absolute left-2 top-2 z-20">
                   <Badge>#{o.id}</Badge>
                 </div>
-
-                {/* แสดง owned เฉพาะ > 0 */}
-                {owned > 0 && (
-                  <div className="absolute left-12 top-2 z-20">
-                    <Badge>owned {owned}</Badge>
-                  </div>
-                )}
+                <div className="absolute left-12 top-2 z-20">
+                  <Badge>owned {owned}</Badge>
+                </div>
 
                 {picked > 0 && (
                   <button
@@ -384,12 +371,9 @@ function PageInner() {
                   title="กดการ์ดเพื่อเพิ่ม 1 ใบ"
                 >
                   <PortraitCardImage src={cardImg(o.art, o.kind)} alt={o.code} />
-                  <div className="mt-2 font-medium truncate">
-                    {o.name || o.code.replaceAll("_", " ")}
-                  </div>
+                  <div className="mt-2 font-medium truncate">{o.name || o.code.replaceAll("_", " ")}</div>
                 </button>
 
-                {/* แสดง picked เฉพาะ > 0 */}
                 {picked > 0 && (
                   <div className="absolute right-2 bottom-2 z-20">
                     <Badge>{picked}</Badge>
