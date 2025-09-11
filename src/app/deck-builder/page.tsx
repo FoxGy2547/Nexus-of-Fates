@@ -1,9 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 import { useSearchParams, useRouter } from "next/navigation";
-import cardsData from "@/data/cards.json";
 
 /* ============ types ============ */
 
@@ -11,24 +10,20 @@ type Kind = "character" | "support" | "event";
 
 type InventoryItem = {
   cardId: number; // 1..12 (characters) หรือ 101..103 (supports/events)
-  code: string;   // จาก cards.json เช่น BLAZING_SIGIL
+  code: string;   // เช่น BLAZING_SIGIL
   kind: Kind;
   qty: number;    // จำนวนที่ผู้เล่นมี
 };
 
 type InventoryResponse = { items: InventoryItem[] } | { error: string };
-
 type SaveBody = {
   userId: number;
   name: string;
   characters: number[]; // id 1..12
-  cards: { cardId: number; count: number }[]; // ใช้ 101..103
+  cards: { cardId: number; count: number }[]; // 101..103
 };
-
 type SaveResponse = { ok: true; deckId: number } | { error: string };
-
 type MeResponse = { userId: number } | { error: string };
-
 type OthersState = Record<number, number>;
 
 /* ============ helpers ============ */
@@ -64,15 +59,25 @@ function cardImagePath(code: string, kind: Kind): string {
     : `/cards/${pretty}.png`;
 }
 
-const OTHER_ID_BASE = 100; // 101..103
-type Slot = 1 | 2 | 3;
-function slotToOtherId(slot: Slot): number {
-  return OTHER_ID_BASE + slot; // 101/102/103
+/* ============ Page (with Suspense) ============ */
+
+export default function Page() {
+  return (
+    <Suspense
+      fallback={
+        <main className="min-h-screen p-6">
+          <div className="opacity-60">Loading deck builder…</div>
+        </main>
+      }
+    >
+      <DeckBuilderInner />
+    </Suspense>
+  );
 }
 
-/* ============ page ============ */
+/* ============ Inner component ============ */
 
-export default function DeckBuilderPage() {
+function DeckBuilderInner() {
   const params = useSearchParams();
   const router = useRouter();
 
