@@ -19,7 +19,7 @@ type InventoryResponse = { items: InventoryItem[] } | { error: string };
 type SaveBody = {
   userId: number;
   name: string;
-  characters: number[]; // id 1..12
+  characters: number[]; // 1..12
   cards: { cardId: number; count: number }[]; // 101..103
 };
 type SaveResponse = { ok: true; deckId: number } | { error: string };
@@ -51,15 +51,17 @@ function codeToPrettyName(code: string): string {
     .join(" ");
 }
 
-/** คืน path รูปใน /public ตามชนิดการ์ด */
+/** คืน path รูปใน /public ตามชนิดการ์ด (เข้ารหัสกันช่องว่าง/อักขระพิเศษ) */
 function cardImagePath(code: string, kind: Kind): string {
-  const pretty = codeToPrettyName(code);
-  return kind === "character"
-    ? `/cards/char_cards/${pretty}.png`
-    : `/cards/${pretty}.png`;
+  const pretty = codeToPrettyName(code); // e.g. "Blaze Knight"
+  const raw =
+    kind === "character"
+      ? `/cards/char_cards/${pretty}.png`
+      : `/cards/${pretty}.png`;
+  return encodeURI(raw); // -> /cards/char_cards/Blaze%20Knight.png
 }
 
-/* ============ Page (with Suspense) ============ */
+/* ============ Page (wrap Suspense) ============ */
 
 export default function Page() {
   return (
@@ -149,14 +151,14 @@ function DeckBuilderInner() {
   }
 
   /* ---------- others add/remove ---------- */
-  function canAdd(cardId: number, owned: number, current: number): boolean {
+  function canAdd(owned: number, current: number): boolean {
     return totalOthers < 20 && current < owned;
   }
 
   function addOne(cardId: number, owned: number) {
     setOthers((prev) => {
       const cur = prev[cardId] ?? 0;
-      if (!canAdd(cardId, owned, cur)) return prev;
+      if (!canAdd(owned, cur)) return prev;
       return { ...prev, [cardId]: cur + 1 };
     });
   }
@@ -256,6 +258,7 @@ function DeckBuilderInner() {
                   src={src}
                   alt={it.code}
                   fill
+                  unoptimized
                   className="object-cover"
                   sizes="(max-width: 768px) 33vw, (max-width: 1024px) 20vw, 16vw"
                 />
@@ -304,6 +307,7 @@ function DeckBuilderInner() {
                   src={src}
                   alt={it.code}
                   fill
+                  unoptimized
                   className="object-cover"
                   sizes="(max-width: 768px) 33vw, (max-width: 1024px) 20vw, 16vw"
                 />
@@ -347,17 +351,3 @@ function DeckBuilderInner() {
     </main>
   );
 }
-
-/* ============ mapping note ============
-
-- Inventory/DB:
-  char_1..char_12  → characters จาก cards.json (char_id ตรงตัว)
-  card_1 (slot1)   → supports[0]  (เช่น HEALING_AMULET)
-  card_2 (slot2)   → supports[1]  (เช่น BLAZING_SIGIL)
-  card_3 (slot3)   → events[0]    (เช่น FIREWORKS)
-
-- ใน UI/Save:
-  ตัวละครใช้ id 1..12
-  การ์ดเสริม/อีเวนต์ใช้ internal id 101..103 (OTHER_ID_BASE+slot)
-
-*/
