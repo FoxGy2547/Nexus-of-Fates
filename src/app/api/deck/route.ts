@@ -19,6 +19,9 @@ function idToSlot(cardId: number): Slot | null {
   const s = cardId - OTHER_ID_BASE;
   return s === 1 || s === 2 || s === 3 ? (s as Slot) : null;
 }
+function slotToId(slot: Slot): number {
+  return OTHER_ID_BASE + slot;
+}
 
 function padToNumNull(arr: number[], len: number): (number | null)[] {
   if (arr.length >= len) return arr.slice(0, len) as (number | null)[];
@@ -26,6 +29,129 @@ function padToNumNull(arr: number[], len: number): (number | null)[] {
   const pad = Array<number | null>(padCount).fill(null);
   return (arr as (number | null)[]).concat(pad);
 }
+
+/* =========================================================
+ * GET  /api/deck?userId=##
+ * - อ่านเด็คที่ is_active = true ของ user
+ * - แปลงออกเป็นรูปแบบที่หน้า deck-builder preload ได้เลย
+ * =======================================================*/
+
+type DeckRow = {
+  id: number;
+  user_id: number;
+  name: string | null;
+  is_active: boolean | null;
+  created_at?: string | null;
+  card_char1: number | null;
+  card_char2: number | null;
+  card_char3: number | null;
+  // card1..card20
+  card1: number | null;  card2: number | null;  card3: number | null;  card4: number | null;  card5: number | null;
+  card6: number | null;  card7: number | null;  card8: number | null;  card9: number | null;  card10: number | null;
+  card11: number | null; card12: number | null; card13: number | null; card14: number | null; card15: number | null;
+  card16: number | null; card17: number | null; card18: number | null; card19: number | null; card20: number | null;
+};
+
+type GetDeckResponse = {
+  ok: true;
+  deckId: number | null;
+  name: string;
+  characters: number[]; // 1..12
+  cards: { cardId: number; count: number }[]; // 101..103, นับรวมจากช่อง card1..card20
+};
+
+export async function GET(req: Request) {
+  try {
+    const url = new URL(req.url);
+    const userId = Number(url.searchParams.get("userId") ?? "0");
+    if (!Number.isFinite(userId) || userId <= 0) {
+      return NextResponse.json({ error: "bad userId" }, { status: 400 });
+    }
+
+    // อ่านเด็คที่ active ของ user
+    const { data, error } = await supa
+      .from("decks")
+      .select(
+        [
+          "id",
+          "user_id",
+          "name",
+          "is_active",
+          "card_char1",
+          "card_char2",
+          "card_char3",
+          // 20 ใบ
+          "card1","card2","card3","card4","card5",
+          "card6","card7","card8","card9","card10",
+          "card11","card12","card13","card14","card15",
+          "card16","card17","card18","card19","card20",
+        ].join(","),
+      )
+      .eq("user_id", userId)
+      .eq("is_active", true)
+      .limit(1)
+      .maybeSingle<DeckRow>();
+
+    if (error) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
+
+    // ถ้าไม่มีเด็ค active ก็ส่งโครงว่าง ๆ เพื่อให้ UI ไม่พัง
+    if (!data) {
+      const payload: GetDeckResponse = {
+        ok: true,
+        deckId: null,
+        name: "My Deck",
+        characters: [],
+        cards: [],
+      };
+      return NextResponse.json(payload);
+    }
+
+    // characters: เก็บเฉพาะตัวเลข 1..12 ที่ไม่ null
+    const charSlots: (keyof DeckRow)[] = ["card_char1", "card_char2", "card_char3"];
+    const characters = charSlots
+      .map((k) => {
+        const v = data[k];
+        return typeof v === "number" ? v : null;
+      })
+      .filter((v): v is number => v != null && v >= 1 && v <= 12);
+
+    // others: card1..card20 นับจำนวนของ 101/102/103
+    const otherKeys: (keyof DeckRow)[] = Array.from({ length: 20 }, (_, i) => `card${i + 1}` as keyof DeckRow);
+    const counter: Record<number, number> = {}; // key = 101..103
+
+    for (const k of otherKeys) {
+      const v = data[k];
+      const n = typeof v === "number" ? v : null;
+      if (n && n >= 101 && n <= 103) {
+        counter[n] = (counter[n] ?? 0) + 1;
+      }
+    }
+
+    const cards = (Object.keys(counter) as unknown as number[])
+      .sort((a, b) => a - b)
+      .map((id) => ({ cardId: id, count: counter[id] }));
+
+    const payload: GetDeckResponse = {
+      ok: true,
+      deckId: data.id,
+      name: data.name ?? "My Deck",
+      characters,
+      cards,
+    };
+    return NextResponse.json(payload);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return NextResponse.json({ error: `deck get failed: ${msg}` }, { status: 500 });
+  }
+}
+
+/* =========================================================
+ * POST  /api/deck
+ * - บันทึกเด็คตามกติกาเดิม (ตัวละคร ≤3, การ์ดอื่นรวม ≤20)
+ * - ตรวจสต็อกจากตาราง inventorys
+ * =======================================================*/
 
 export async function POST(req: Request) {
   let body: SaveBody;

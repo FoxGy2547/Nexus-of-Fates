@@ -1,281 +1,297 @@
 // src/app/deck-builder/page.tsx
 "use client";
 
-import React, { Suspense, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
+import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import cardsDataJson from "@/data/cards.json";
 
-/* ================= types ================= */
+/* ===== types from cards.json ===== */
 type CharacterCard = {
-  char_id: number; code: string; name: string; element: string;
-  attack: number; hp: number; cost: number; abilityCode: string; art: string;
+  char_id: number;
+  code: string;
+  name: string;
+  element: string;
+  attack: number;
+  hp: number;
+  cost: number;
+  abilityCode: string;
+  art: string;
 };
 type SupportCard = { id: number; code: string; name: string; element: string; cost: number; text: string; art: string };
-type EventCard   = { id: number; code: string; name: string; element: string; cost: number; text: string; art: string };
-type CardsData   = { characters: CharacterCard[]; supports: SupportCard[]; events: EventCard[] };
-const cardsData  = cardsDataJson as CardsData;
+type EventCard = { id: number; code: string; name: string; element: string; cost: number; text: string; art: string };
+type CardsData = { characters: CharacterCard[]; supports: SupportCard[]; events: EventCard[] };
+const cardsData = cardsDataJson as CardsData;
 
-type Inventory = { userId: number; chars: Record<number, number>; others: Record<number, number> };
-
-type SaveBody = { userId: number; name: string; characters: number[]; cards: { cardId: number; count: number }[] };
-
-type DeckResp =
-  | { ok: true; deck: { name: string; characters: number[]; cards: { cardId: number; count: number }[] } }
-  | { ok: true; deck?: undefined };
-
-type MeResp = { ok: boolean; user?: { id: number } };
-
-/* ================ constants ================ */
-const CARD_W = 220;
-const CARD_RATIO = "aspect-[2/3]";
-
-/* ================ helpers ================ */
-function cardImg(art: string, kind: "character" | "support" | "event"): string {
-  return encodeURI(kind === "character" ? `/char_cards/${art}` : `/cards/${art}`);
-}
-async function getJSON<T>(url: string): Promise<T> {
-  const r = await fetch(url, { cache: "no-store" });
-  if (!r.ok) throw new Error(await r.text().catch(() => r.statusText));
-  return (await r.json()) as T;
-}
-async function postJSON<T>(url: string, body: unknown): Promise<T> {
-  const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, cache: "no-store", body: JSON.stringify(body) });
-  const txt = await r.text().catch(() => "");
-  if (!r.ok) throw new Error(txt || r.statusText);
-  return (txt ? JSON.parse(txt) : ({} as T)) as T;
+/* ===== helpers (art path จาก cards.json) ===== */
+function cardImagePath(code: string, art: string, kind: "character" | "support" | "event"): string {
+  return kind === "character" ? `/char_cards/${art}` : `/cards/${art}`;
 }
 
-/** แปลง payload inventory ให้เป็นทรงมาตรฐาน {chars, others} */
-function normalizeInventory(raw: unknown): Inventory {
-  const empty: Inventory = { userId: 0, chars: {}, others: {} };
-  if (!raw || typeof raw !== "object") return empty;
+const ELEMENT_ICON: Record<string, string> = {
+  Pyro: "/dice/pyro.png",
+  Hydro: "/dice/hydro.png",
+  Cryo: "/dice/cryo.png",
+  Electro: "/dice/electro.png",
+  Geo: "/dice/geo.png",
+  Anemo: "/dice/anemo.png",
+  Quantum: "/dice/quantum.png",
+  Imaginary: "/dice/imaginary.png",
+  Neutral: "/dice/neutral.png",
+  Infinite: "/dice/infinite.png",
+};
 
-  // กรณีส่งมารายการเดียว (row เดียว)
-  const top = raw as Record<string, unknown>;
-  const row: Record<string, unknown> =
-    (typeof top.row === "object" && top.row ? (top.row as Record<string, unknown>) : top);
-
-  const inv: Inventory = {
-    userId: Number(row.user_id ?? 0) || Number((top.userId as number) ?? 0) || 0,
-    chars: {},
-    others: {},
-  };
-
-  // ถ้ามีทรงมาตรฐานแล้ว ก็ใช้เลย
-  if (typeof row.chars === "object" && row.chars && !Array.isArray(row.chars)) {
-    const c = row.chars as Record<string, unknown>;
-    for (const [k, v] of Object.entries(c)) inv.chars[Number(k)] = Number(v ?? 0);
-  }
-  if (typeof row.others === "object" && row.others && !Array.isArray(row.others)) {
-    const o = row.others as Record<string, unknown>;
-    for (const [k, v] of Object.entries(o)) inv.others[Number(k)] = Number(v ?? 0);
-  }
-
-  // รองรับคอลัมน์แบบ char_1 … card_1 …
-  for (const [k, v] of Object.entries(row)) {
-    if (typeof v === "number" || typeof v === "string") {
-      const mChar = /^char_(\d+)$/.exec(k);
-      if (mChar) { inv.chars[Number(mChar[1])] = Number(v); continue; }
-      const mCard = /^card_(\d+)$/.exec(k);
-      if (mCard) { inv.others[Number(mCard[1])] = Number(v); continue; }
-    }
-  }
-  return inv;
-}
-
-/* ================ data from cards.json ================ */
-const CHAR_CARDS = cardsData.characters.map(c => ({ id: c.char_id, code: c.code, name: c.name, art: c.art }));
-const OTHER_CARDS = [
-  ...cardsData.supports.map(s => ({ id: s.id, code: s.code, name: s.name, art: s.art, kind: "support" as const })),
-  ...cardsData.events.map(e => ({ id: e.id, code: e.code, name: e.name, art: e.art, kind: "event"  as const })),
-];
-
-/* ================ UI bits ================ */
-function Badge({ children }: { children: React.ReactNode }) {
-  return <span className="px-1.5 py-0.5 rounded text-[11px] bg-black/70 text-white pointer-events-none">{children}</span>;
-}
-function PortraitCardImage({ src, alt }: { src: string; alt: string }) {
-  return (
-    <div className={`relative w-full ${CARD_RATIO} rounded-lg overflow-hidden bg-neutral-900/60`}>
-      <Image src={src} alt={alt} fill className="object-contain" unoptimized />
-    </div>
-  );
-}
-
-/* ================= Page ================= */
-function PageInner() {
+/* ===== page ===== */
+export default function DeckBuilderPage() {
   const sp = useSearchParams();
-  const qsUserId = Number(sp.get("userId") ?? 0) || 0;
+  const userId = Number(sp.get("userId") || ""); // ต้องมี userId เพื่อดึง inventory/deck
 
-  const [userId, setUserId] = useState<number>(qsUserId);
+  // — master lists
+  const CHAR_LIST = cardsData.characters;
+  const OTHER_LIST = [...cardsData.supports, ...cardsData.events].map((c) => ({
+    ...c,
+    kind: "supportOrEvent" as const,
+  }));
+
+  // — owned from /api/inventory
+  const [ownedChar, setOwnedChar] = useState<Record<number, number>>({});
+  const [ownedCard, setOwnedCard] = useState<Record<number, number>>({});
+
+  // — deck selection states
+  const [deckId, setDeckId] = useState<number | null>(null);
   const [name, setName] = useState<string>("My Deck");
-  const [inv, setInv] = useState<Inventory | null>(null);
-  const [selChars, setSelChars] = useState<number[]>([]);
-  const [selOthers, setSelOthers] = useState<Record<number, number>>({});
-  const othersTotal = useMemo(() => Object.values(selOthers).reduce((a, b) => a + b, 0), [selOthers]);
+  const [selChars, setSelChars] = useState<number[]>([]); // char ids (≤3)
+  const [otherCount, setOtherCount] = useState<Record<number, number>>({}); // card id -> count
 
-  // 0) if ไม่มี ?userId= ให้ลอง /api/me
-  useEffect(() => {
-    if (qsUserId) return; // ระบุมาแล้ว
-    (async () => {
-      try {
-        const me = await getJSON<MeResp>("/api/me");
-        const uid = Number(me.user?.id ?? 0);
-        if (uid) setUserId(uid);
-      } catch {
-        // ปล่อยให้ว่าง/ผู้ใช้จะกด Save ไม่ได้จนกว่าจะมี userId
-      }
-    })();
-  }, [qsUserId]);
+  const totalOthers = useMemo(
+    () => Object.values(otherCount).reduce((a, b) => a + (b ?? 0), 0),
+    [otherCount]
+  );
 
-  // sync ถ้ามี ?userId=
-  useEffect(() => {
-    if (qsUserId && qsUserId !== userId) setUserId(qsUserId);
-  }, [qsUserId, userId]);
-
-  // 1) โหลด inventory + deck พร้อมกัน → แล้วพรีฟิล
+  /* ---------- load inventory & deck on mount ---------- */
   useEffect(() => {
     if (!userId) return;
-    (async () => {
-      try {
-        const [invRaw, deckResp] = await Promise.all([
-          getJSON<unknown>(`/api/inventory?userId=${userId}`),
-          getJSON<DeckResp>(`/api/deck?userId=${userId}`),
-        ]);
-        const norm = normalizeInventory(invRaw);
-        setInv(norm);
 
-        if (deckResp.deck) {
-          setName(deckResp.deck.name || "My Deck");
-          setSelChars(deckResp.deck.characters ?? []);
-          const rec: Record<number, number> = {};
-          for (const it of deckResp.deck.cards ?? []) rec[it.cardId] = it.count;
-          setSelOthers(rec);
-        } else {
-          // ไม่มีเด็ค → เคลียร์ค่าที่เลือกไว้
-          setSelChars([]);
-          setSelOthers({});
-        }
-      } catch (e) {
-        console.error("load deck/inventory failed:", e);
+    // 1) owned
+    (async () => {
+      const r = await fetch(`/api/inventory?userId=${userId}`, { cache: "no-store" });
+      const j = (await r.json()) as {
+        ok?: boolean;
+        char?: Record<number, number>;
+        card?: Record<number, number>;
+      };
+      if (j?.char) setOwnedChar(j.char);
+      if (j?.card) setOwnedCard(j.card);
+    })();
+
+    // 2) last deck
+    (async () => {
+      const r = await fetch(`/api/deck?userId=${userId}`, { cache: "no-store" });
+      const j = (await r.json()) as {
+        ok: boolean;
+        deck: { deckId: number; name: string; chars: number[]; cards: number[] } | null;
+      };
+      if (j?.deck) {
+        setDeckId(j.deck.deckId);
+        setName(j.deck.name || "My Deck");
+        setSelChars(j.deck.chars.slice(0, 3));
+
+        // แปลง array เป็น map นับจำนวน
+        const m: Record<number, number> = {};
+        for (const id of j.deck.cards) m[id] = (m[id] ?? 0) + 1;
+        setOtherCount(m);
+      } else {
+        // ไม่มีเด็ค -> เคลียร์
+        setDeckId(null);
+        setSelChars([]);
+        setOtherCount({});
       }
     })();
   }, [userId]);
 
+  /* ---------- select handlers ---------- */
   function toggleChar(id: number) {
-    setSelChars((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : prev.length >= 3 ? prev : [...prev, id]));
-  }
-  function addOther(id: number) {
-    setSelOthers((prev) => ({ ...prev, [id]: Math.min(20, (prev[id] ?? 0) + 1) }));
-  }
-  function decOther(id: number) {
-    setSelOthers((prev) => {
-      const n = Math.max(0, (prev[id] ?? 0) - 1);
-      const next = { ...prev };
-      if (n === 0) delete next[id];
-      else next[id] = n;
-      return next;
+    setSelChars((prev) => {
+      const has = prev.includes(id);
+      if (has) return prev.filter((x) => x !== id);
+      if (prev.length >= 3) return prev; // จำกัด 3
+      return [...prev, id];
     });
   }
+  function incOther(id: number) {
+    setOtherCount((p) => {
+      const now = p[id] ?? 0;
+      if (totalOthers >= 20 && now === 0) return p; // เกินโควต้า
+      return { ...p, [id]: Math.min(now + 1, 20) };
+    });
+  }
+  function decOther(id: number) {
+    setOtherCount((p) => {
+      const now = p[id] ?? 0;
+      if (now <= 0) return p;
+      const nx = { ...p, [id]: now - 1 };
+      if (nx[id] <= 0) delete nx[id];
+      return nx;
+    });
+  }
+
+  /* ---------- save ---------- */
   async function onSave() {
-    if (!userId) return alert("ไม่พบ userId (แนบ ?userId= ใน URL หรือ login เพื่อให้ระบบหาให้อัตโนมัติ)");
-    if (selChars.length === 0) return alert("เลือกตัวละครอย่างน้อย 1 ตัวก่อนนะ");
-    const body: SaveBody = {
-      userId,
-      name,
-      characters: selChars,
-      cards: Object.entries(selOthers).map(([id, count]) => ({ cardId: Number(id), count: Number(count) })),
-    };
-    try {
-      await postJSON("/api/deck", body);
-      alert("บันทึกเด็คเรียบร้อยแล้ว!");
-    } catch (e) {
-      alert(`Save ล้มเหลว: ${e instanceof Error ? e.message : String(e)}`);
+    if (!userId) {
+      alert("ต้องมี userId ใน query เช่น /deck-builder?userId=6");
+      return;
     }
+    const flatOthers: { cardId: number; count: number }[] = Object.entries(otherCount).map(([k, v]) => ({
+      cardId: Number(k),
+      count: Number(v ?? 0),
+    }));
+    const res = await fetch("/api/deck", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        deckId: deckId ?? undefined,
+        userId,
+        name,
+        characters: selChars,
+        cards: flatOthers,
+      }),
+    });
+    const j = (await res.json()) as { ok?: boolean; deckId?: number; error?: string };
+    if (!res.ok || !j.ok) {
+      alert(j.error || "save failed");
+      return;
+    }
+    setDeckId(j.deckId ?? deckId);
+    alert("Saved!");
+  }
+
+  /* ---------- ui bits ---------- */
+  function OwnedBadge({ n }: { n: number }) {
+    return (
+      <span className="absolute left-1 top-1 text-[10px] rounded bg-black/70 px-1">
+        owned {n}
+      </span>
+    );
+  }
+
+  function CardShell({
+    children,
+    selected,
+    onRemove,
+  }: {
+    children: React.ReactNode;
+    selected?: boolean;
+    onRemove?: () => void;
+  }) {
+    return (
+      <div
+        className={`relative rounded-xl border bg-black/40 ${
+          selected ? "border-emerald-400" : "border-white/10"
+        }`}
+      >
+        {selected && onRemove && (
+          <button
+            onClick={onRemove}
+            className="absolute right-1 top-1 rounded bg-rose-600 text-xs px-1"
+            title="remove"
+          >
+            ×
+          </button>
+        )}
+        {children}
+      </div>
+    );
   }
 
   return (
     <main className="min-h-screen p-6 flex flex-col gap-6">
       <header className="flex items-center gap-3">
-        <input className="px-3 py-2 rounded bg-neutral-800 flex-1" value={name} onChange={(e)=>setName(e.target.value)} placeholder="Deck name" />
-        <div className="text-sm opacity-70">Chars {selChars.length}/3</div>
-        <div className="text-sm opacity-70">Others {othersTotal}/20</div>
-        <button className="px-4 py-2 rounded bg-emerald-600" onClick={onSave}>Save</button>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          className="px-3 py-2 rounded bg-neutral-900 border border-white/10"
+          placeholder="Deck name"
+        />
+        <div className="ml-auto text-sm opacity-70">
+          Chars {selChars.length}/3 · Others {totalOthers}/20
+        </div>
+        <button className="px-4 py-2 rounded bg-emerald-600" onClick={onSave}>
+          Save
+        </button>
       </header>
 
-      {/* Characters */}
+      {/* characters */}
       <section>
-        <div className="font-semibold mb-2">Characters</div>
-        <div className="flex flex-wrap gap-3">
-          {CHAR_CARDS.map((c) => {
-            const owned = inv?.chars?.[c.id] ?? 0;              // << owned จาก inventory (normalize แล้ว)
-            const selected = selChars.includes(c.id);           // << พรีฟิลจาก deck
+        <h2 className="font-semibold mb-2">Characters</h2>
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+          {CHAR_LIST.map((c) => {
+            const owned = ownedChar[c.char_id] ?? 0;
+            const selected = selChars.includes(c.char_id);
+            const art = cardImagePath(c.code, c.art, "character");
             return (
-              <button
-                key={c.id}
-                className={`relative border p-3 text-left rounded-xl ${selected ? "border-emerald-500" : "border-white/10"} bg-black/20 hover:bg-black/30`}
-                style={{ width: CARD_W }}
-                onClick={() => toggleChar(c.id)}
-                title="กดเพื่อเลือก/เอาออก"
+              <CardShell
+                key={c.char_id}
+                selected={selected}
+                onRemove={selected ? () => toggleChar(c.char_id) : undefined}
               >
-                <div className="absolute left-2 top-2 z-10"><Badge>#{c.id}</Badge></div>
-                <div className="absolute right-2 top-2 z-10"><Badge>owned {owned}</Badge></div>
-                <div className="mt-3">
-                  <PortraitCardImage src={cardImg(c.art, "character")} alt={c.code} />
-                </div>
-                <div className="mt-2 font-medium truncate">{c.name || c.code.replaceAll("_", " ")}</div>
-              </button>
+                <button
+                  onClick={() => toggleChar(c.char_id)}
+                  className="block w-full"
+                  title={c.name}
+                >
+                  <div className="relative aspect-[2/3]">
+                    <Image src={art} alt={c.name} fill className="object-contain" unoptimized />
+                    <OwnedBadge n={owned} />
+                  </div>
+                  <div className="px-2 py-2 text-sm">{c.name}</div>
+                </button>
+              </CardShell>
             );
           })}
         </div>
       </section>
 
-      {/* Supports & Events */}
+      {/* supports & events */}
       <section>
-        <div className="font-semibold mb-2">Supports & Events</div>
-        <div className="flex flex-wrap gap-3">
-          {OTHER_CARDS.map((o) => {
-            const owned = inv?.others?.[o.id] ?? 0;           // << owned จาก inventory
-            const picked = selOthers[o.id] ?? 0;              // << พรีฟิลจาก deck
+        <h2 className="font-semibold mb-2">Supports & Events</h2>
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
+          {OTHER_LIST.map((c) => {
+            const id = (c as SupportCard | EventCard).id;
+            const owned = ownedCard[id] ?? 0;
+            const picked = otherCount[id] ?? 0;
+            const art = cardImagePath(c.code, c.art, "support");
             return (
-              <div
-                key={`${o.kind}-${o.id}`}
-                className="relative border border-white/10 p-3 rounded-xl bg-black/20 hover:bg-black/30"
-                style={{ width: CARD_W }}
-              >
-                <div className="absolute left-2 top-2 z-20"><Badge>#{o.id}</Badge></div>
-                <div className="absolute left-12 top-2 z-20"><Badge>owned {owned}</Badge></div>
-
-                {picked > 0 && (
-                  <button
-                    className="absolute right-2 top-2 z-30 rounded bg-rose-600 px-1.5 py-0.5 text-[11px]"
-                    onClick={() => decOther(o.id)}
-                    title="ลบ 1 ใบ"
-                  >
-                    −
-                  </button>
-                )}
-
-                <button className="block w-full text-left relative z-0" onClick={() => addOther(o.id)} title="กดการ์ดเพื่อเพิ่ม 1 ใบ">
-                  <PortraitCardImage src={cardImg(o.art, o.kind)} alt={o.code} />
-                  <div className="mt-2 font-medium truncate">{o.name || o.code.replaceAll("_", " ")}</div>
-                </button>
-
-                <div className="absolute right-2 bottom-2 z-20"><Badge>{picked}</Badge></div>
-              </div>
+              <CardShell key={`o-${id}`}>
+                <div className="relative aspect-[2/3]">
+                  <Image src={art} alt={c.name} fill className="object-contain" unoptimized />
+                  <OwnedBadge n={owned} />
+                  {/* ปุ่ม + / – มุมขวา */}
+                  <div className="absolute right-1 top-1 flex gap-1">
+                    <button
+                      onClick={() => decOther(id)}
+                      className="rounded bg-neutral-700 px-2 text-xs"
+                      title="remove 1"
+                    >
+                      –
+                    </button>
+                    <button
+                      onClick={() => incOther(id)}
+                      className="rounded bg-emerald-700 px-2 text-xs"
+                      title="add 1"
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+                <div className="px-2 py-2 text-sm flex items-center justify-between">
+                  <span className="truncate">{c.name}</span>
+                  <span className="text-xs opacity-70">{picked}</span>
+                </div>
+              </CardShell>
             );
           })}
         </div>
       </section>
     </main>
-  );
-}
-
-export default function DeckBuilderPage() {
-  return (
-    <Suspense fallback={<main className="min-h-screen p-6">Loading…</main>}>
-      <PageInner />
-    </Suspense>
   );
 }
