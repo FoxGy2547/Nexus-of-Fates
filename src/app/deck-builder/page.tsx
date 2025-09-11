@@ -1,7 +1,9 @@
+// src/app/deck-builder/page.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
 
+/* ============ types ============ */
 type Item = {
   cardId: number;
   code: string;
@@ -9,40 +11,55 @@ type Item = {
   qty: number;
 };
 
-async function fetchJSON<T = any>(url: string, init?: RequestInit): Promise<T> {
+/* ============ helpers ============ */
+function isErrPayload(x: unknown): x is { error?: string; message?: string } {
+  return !!x && typeof x === "object" && ("error" in (x as Record<string, unknown>) || "message" in (x as Record<string, unknown>));
+}
+
+async function fetchJSON<T = unknown>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, { cache: "no-store", ...init });
   const text = await res.text().catch(() => "");
-  let data: any = null;
+
+  let data: unknown = null;
   if (text) {
-    try { data = JSON.parse(text); } 
-    catch {
+    try {
+      data = JSON.parse(text) as unknown;
+    } catch {
       throw new Error(`Bad JSON from ${url}: ${text.slice(0, 120)}`);
     }
   }
+
   if (!res.ok) {
-    const msg = (data && (data.error || data.message)) || text || res.statusText || "Request failed";
+    const msg =
+      (isErrPayload(data) && (data.error || data.message)) ||
+      text ||
+      res.statusText ||
+      "Request failed";
     throw new Error(msg);
   }
-  return (data ?? {}) as T;
+
+  return (data as T) ?? ({} as T);
 }
 
+/* ============ page ============ */
 export default function DeckBuilderPage() {
   const [meId, setMeId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [items, setItems] = useState<Item[]>([]);
   const [name, setName] = useState("My Deck");
 
+  // selections
   const [chars, setChars] = useState<number[]>([]);
-  const [others, setOthers] = useState<Record<number, number>>({});
+  const [others, setOthers] = useState<Record<number, number>>({}); // cardId -> count
   const totalOthers = useMemo(() => Object.values(others).reduce((a, b) => a + b, 0), [others]);
 
+  // load me -> inventory
   useEffect(() => {
     (async () => {
       setLoading(true);
       try {
         const me = await fetchJSON<{ userId: number }>("/api/me");
         setMeId(Number(me.userId));
-
         const inv = await fetchJSON<{ items: Item[] }>(`/api/inventory?userId=${me.userId}`);
         setItems(inv.items ?? []);
       } catch (e) {
@@ -56,6 +73,7 @@ export default function DeckBuilderPage() {
   const characters = useMemo(() => items.filter(i => i.kind === "character"), [items]);
   const othersPool = useMemo(() => items.filter(i => i.kind !== "character"), [items]);
 
+  /* actions */
   function toggleChar(cardId: number) {
     if (chars.includes(cardId)) setChars(chars.filter(x => x !== cardId));
     else if (chars.length < 3) setChars([...chars, cardId]);
@@ -85,6 +103,7 @@ export default function DeckBuilderPage() {
       };
       const res = await fetchJSON<{ ok: boolean; deckId: number }>("/api/deck", {
         method: "POST",
+        headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       });
       alert(`Saved deck #${res.deckId}`);
@@ -93,8 +112,10 @@ export default function DeckBuilderPage() {
     }
   }
 
+  /* UI */
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100">
+      {/* toolbar */}
       <header className="sticky top-0 z-10 backdrop-blur bg-neutral-950/60 border-b border-neutral-900">
         <div className="max-w-6xl mx-auto px-4 py-3 flex items-center gap-3">
           <input
@@ -104,8 +125,12 @@ export default function DeckBuilderPage() {
             aria-label="Deck name"
           />
           <div className="ml-auto flex items-center gap-2">
-            <span className="text-xs px-2 py-1 rounded-md border border-neutral-800 bg-neutral-900/70">Chars {chars.length}/3</span>
-            <span className="text-xs px-2 py-1 rounded-md border border-neutral-800 bg-neutral-900/70">Others {totalOthers}/20</span>
+            <span className="text-xs px-2 py-1 rounded-md border border-neutral-800 bg-neutral-900/70">
+              Chars {chars.length}/3
+            </span>
+            <span className="text-xs px-2 py-1 rounded-md border border-neutral-800 bg-neutral-900/70">
+              Others {totalOthers}/20
+            </span>
             <button
               onClick={save}
               disabled={!meId || chars.length === 0 || totalOthers === 0}
@@ -117,6 +142,7 @@ export default function DeckBuilderPage() {
         </div>
       </header>
 
+      {/* content */}
       <main className="max-w-6xl mx-auto px-4 py-6 space-y-6">
         {/* Characters */}
         <section>
@@ -180,7 +206,7 @@ export default function DeckBuilderPage() {
                       <div className="absolute bottom-2 right-2 flex items-center gap-2">
                         <button
                           onClick={() => decOther(it.cardId)}
-                          className="w-7 h-7 grid place-items-center rounded-lg bg-neutral-850 hover:bg-neutral-800 border border-neutral-800"
+                          className="w-7 h-7 grid place-items-center rounded-lg bg-neutral-800 hover:bg-neutral-700 border border-neutral-800"
                         >
                           −
                         </button>
@@ -192,7 +218,7 @@ export default function DeckBuilderPage() {
                             "w-7 h-7 grid place-items-center rounded-lg",
                             left > 0 && totalOthers < 20
                               ? "bg-emerald-700 hover:bg-emerald-600"
-                              : "bg-neutral-850 border border-neutral-800 opacity-50 cursor-not-allowed",
+                              : "bg-neutral-800 border border-neutral-800 opacity-50 cursor-not-allowed",
                           ].join(" ")}
                         >
                           +
