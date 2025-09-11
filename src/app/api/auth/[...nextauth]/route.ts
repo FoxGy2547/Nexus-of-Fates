@@ -1,7 +1,7 @@
 // src/app/api/auth/[...nextauth]/route.ts
 import NextAuth, { type NextAuthOptions } from "next-auth";
 import DiscordProvider from "next-auth/providers/discord";
-import { queryOne } from "@/lib/db";
+import { createClient } from "@supabase/supabase-js";
 
 /** Next.js route config */
 export const runtime = "nodejs";
@@ -26,18 +26,20 @@ declare module "next-auth" {
   }
 }
 
-/** ---- DB row types ---- */
-type UserIdRow = { id: number };
+/** ---- Supabase admin client (service role) ---- */
+const SUPA_URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
+const SUPA_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
+const supa =
+  SUPA_URL && SUPA_SERVICE_ROLE
+    ? createClient(SUPA_URL, SUPA_SERVICE_ROLE, { auth: { persistSession: false } })
+    : null;
 
-/** Discord profile fields ที่ใช้ (ให้ type ชัด ๆ) */
+/** ลดความซับซ้อนของข้อมูลโปรไฟล์จาก Discord */
 type MaybeDiscordProfile = Partial<
-  Record<
-    "email" | "global_name" | "username" | "name" | "image_url" | "avatar",
-    string
-  >
+  Record<"email" | "global_name" | "username" | "name" | "image_url" | "avatar", string>
 >;
 
-/** ==== NextAuth options (ใช้ JWT, ไม่ผูก Adapter DB) ==== */
+/** ==== NextAuth options (ใช้ JWT, upsert ผู้ใช้ด้วย Supabase) ==== */
 const authOptions: NextAuthOptions = {
   session: { strategy: "jwt" },
   providers: [
@@ -49,52 +51,42 @@ const authOptions: NextAuthOptions = {
   ],
   callbacks: {
     async jwt({ token, account, user, profile }) {
-      // discord id จาก provider หรือใช้ sub เป็น fallback
       const discordId: string =
-        account?.provider === "discord"
-          ? account.providerAccountId
-          : (token.sub ?? "");
+        account?.provider === "discord" ? account.providerAccountId : (token.sub ?? "");
 
-      const p: MaybeDiscordProfile | null =
-        (profile ?? null) as MaybeDiscordProfile | null;
-
+      const p = (profile ?? null) as MaybeDiscordProfile | null;
       const email: string | null = token.email ?? user?.email ?? p?.email ?? null;
       const username: string | null =
-        token.name ??
-        user?.name ??
-        p?.global_name ??
-        p?.username ??
-        p?.name ??
-        null;
-      const avatar: string | null =
-        token.picture ?? user?.image ?? p?.image_url ?? p?.avatar ?? null;
+        token.name ?? user?.name ?? p?.global_name ?? p?.username ?? p?.name ?? null;
+      const avatar: string | null = token.picture ?? user?.image ?? p?.image_url ?? p?.avatar ?? null;
 
       let uid: string = discordId;
 
-      // ⤵️ upsert ผู้ใช้ลง Postgres (Supabase)
-      try {
-        const row = await queryOne<UserIdRow>(
-          `
-          insert into public.users (discord_id, email, username, avatar)
-          values ($1, $2, $3, $4)
-          on conflict (discord_id) do update
-             set email = excluded.email,
-                 username = excluded.username,
-                 avatar = excluded.avatar
-          returning id;
-          `,
-          [discordId, email, username, avatar]
-        );
-        if (row?.id) uid = String(row.id);
-      } catch (err) {
-        console.warn("[nextauth] DB skipped:", err);
+      // upsert ผู้ใช้ในตาราง public.users ด้วย service role (ถ้าตั้ง env ไว้)
+      if (supa) {
+        try {
+          const { data } = await supa
+            .from("users")
+            .upsert(
+              {
+                discord_id: discordId,
+                email,
+                username,
+                avatar,
+              },
+              { onConflict: "discord_id" }
+            )
+            .select("id")
+            .single();
+          if (data?.id) uid = String(data.id);
+        } catch (err) {
+          console.warn("[nextauth] supabase upsert skipped:", err);
+        }
       }
 
-      // เติมข้อมูลลง token
       token.uid = uid;
       if (username !== null && username !== undefined) token.name = username;
       if (avatar !== null && avatar !== undefined) token.picture = avatar;
-
       return token;
     },
 
