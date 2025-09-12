@@ -98,9 +98,7 @@ export default function Home() {
       });
       router.push(`/play/${(res.roomId || roomId).toUpperCase()}`);
     } catch (e: unknown) {
-      alert(
-        `Create failed: ${e instanceof Error ? e.message : "unknown"}`
-      );
+      alert(`Create failed: ${e instanceof Error ? e.message : "unknown"}`);
     }
   }
 
@@ -130,9 +128,7 @@ export default function Home() {
             {session?.user?.image && (
               <Image
                 src={session.user.image}
-                alt={
-                  session.user?.name ? `${session.user.name} avatar` : ""
-                }
+                alt={session.user?.name ? `${session.user.name} avatar` : ""}
                 width={32}
                 height={32}
                 className="rounded-full"
@@ -165,14 +161,9 @@ export default function Home() {
               className="px-3 py-2 rounded bg-neutral-800 flex-1"
               placeholder="ROOM CODE (เว้นว่างให้สุ่มได้)"
               value={createCode}
-              onChange={(e) =>
-                setCreateCode(e.target.value.toUpperCase())
-              }
+              onChange={(e) => setCreateCode(e.target.value.toUpperCase())}
             />
-            <button
-              className="px-4 py-2 rounded bg-emerald-600"
-              onClick={onCreate}
-            >
+            <button className="px-4 py-2 rounded bg-emerald-600" onClick={onCreate}>
               Create
             </button>
           </div>
@@ -185,9 +176,7 @@ export default function Home() {
               className="px-3 py-2 rounded bg-neutral-800 flex-1"
               placeholder="เช่น ABC123"
               value={joinCode}
-              onChange={(e) =>
-                setJoinCode(e.target.value.toUpperCase())
-              }
+              onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
             />
             <button
               className="px-4 py-2 rounded bg-sky-600"
@@ -204,9 +193,7 @@ export default function Home() {
       <section className="rounded-xl border border-white/10 p-4 bg-black/20">
         <div className="flex flex-wrap items-center gap-3">
           <div className="font-semibold">Deck Builder</div>
-          <span className="text-sm opacity-70">
-            เพิ่ม / แก้ไขเด็ค
-          </span>
+          <span className="text-sm opacity-70">เพิ่ม / แก้ไขเด็ค</span>
           <div className="ml-auto">
             <button
               className="px-4 py-2 rounded bg-purple-600 hover:bg-purple-500 disabled:opacity-50"
@@ -227,16 +214,16 @@ export default function Home() {
           <span className="text-sm opacity-70">
             มีแบนเนอร์สวย ๆ ให้กดเล่นเพลิน ๆ
           </span>
-        </div>
-        <div className="mt-3 flex gap-2">
-          <button
-            className="px-4 py-2 rounded bg-amber-600 hover:bg-amber-500 disabled:opacity-50"
-            onClick={() => router.push("/wish")}
-            disabled={status !== "authenticated"}
-            title={status !== "authenticated" ? "ล็อกอินก่อนนะ" : ""}
-          >
-            Open Wish
-          </button>
+          <div className="ml-auto">
+            <button
+              className="px-4 py-2 rounded bg-amber-600 hover:bg-amber-500 disabled:opacity-50"
+              onClick={() => router.push("/wish")}
+              disabled={status !== "authenticated"}
+              title={status !== "authenticated" ? "ล็อกอินก่อนนะ" : ""}
+            >
+              Open Gacha
+            </button>
+          </div>
         </div>
       </section>
     </main>
