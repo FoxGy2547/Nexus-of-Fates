@@ -3,7 +3,7 @@
 
 import React, { Suspense, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
-import { useSearchParams } from "next/navigation";
+import { useSearchParams, useRouter } from "next/navigation";
 import cardsDataJson from "@/data/cards.json";
 
 /* ================= types ================= */
@@ -79,9 +79,7 @@ async function postJSON<T>(url: string, body: unknown): Promise<T> {
   return (txt ? JSON.parse(txt) : ({} as T)) as T;
 }
 
-/** -------- INVENTORY --------
- * รองรับ items[] และคีย์กระจาย char_#/card_#
- */
+/** -------- INVENTORY -------- */
 function normalizeInventory(raw: unknown): Inventory {
   const empty: Inventory = { userId: 0, chars: {}, others: {} };
   if (!raw || typeof raw !== "object") return empty;
@@ -96,7 +94,7 @@ function normalizeInventory(raw: unknown): Inventory {
       const kind = String(it.kind ?? "");
       if (!Number.isFinite(id) || qty <= 0) continue;
       if (kind === "character") inv.chars[id] = qty;
-      else inv.others[id >= 101 ? id - 100 : id] = qty; // กันกรณี 101..103
+      else inv.others[id >= 101 ? id - 100 : id] = qty;
     }
     return inv;
   }
@@ -145,9 +143,7 @@ function normalizeInventory(raw: unknown): Inventory {
   return inv;
 }
 
-/** -------- DECK --------
- * ดึงค่าจากทุกรูปแบบ → { name, characters(รวม 0), others(1..3→count) }
- */
+/** -------- DECK -------- */
 function normalizeDeck(raw: unknown): { name: string; characters: number[]; others: Record<number, number> } {
   let deckObj: Record<string, unknown> | null = null;
 
@@ -166,7 +162,6 @@ function normalizeDeck(raw: unknown): { name: string; characters: number[]; othe
 
   const name = String(deckObj?.name ?? "My Deck");
 
-  // characters (ยอมรับ 0 ด้วย)
   let characters: number[] = [];
   if (Array.isArray(deckObj?.characters)) {
     characters = (deckObj!.characters as unknown[])
@@ -183,7 +178,6 @@ function normalizeDeck(raw: unknown): { name: string; characters: number[]; othe
     characters = tmp;
   }
 
-  // others (1/2/3)
   const others: Record<number, number> = {};
   if (Array.isArray(deckObj?.cards)) {
     for (const it of deckObj!.cards as Array<Record<string, unknown>>) {
@@ -229,6 +223,7 @@ function PortraitCardImage({ src, alt }: { src: string; alt: string }) {
 /* ================= Page ================= */
 function PageInner() {
   const sp = useSearchParams();
+  const router = useRouter();
   const qsUserId = Number(sp.get("userId") ?? 0) || 0;
 
   const [userId, setUserId] = useState<number>(qsUserId);
@@ -241,7 +236,6 @@ function PageInner() {
   const othersTotal = useMemo(() => Object.values(selOthers).reduce((a, b) => a + b, 0), [selOthers]);
   const canAddMore = othersTotal < 20;
 
-  // ถ้าไม่มี ?userId= ลอง /api/me
   useEffect(() => {
     if (qsUserId) return;
     (async () => {
@@ -249,18 +243,14 @@ function PageInner() {
         const me = await getJSON<MeResp>("/api/me");
         const uid = Number(me.user?.id ?? 0);
         if (uid) setUserId(uid);
-      } catch {
-        /* ignore */
-      }
+      } catch {}
     })();
   }, [qsUserId]);
 
-  // sync ?userId=
   useEffect(() => {
     if (qsUserId && qsUserId !== userId) setUserId(qsUserId);
   }, [qsUserId, userId]);
 
-  // โหลด inventory + deck → พรีฟิล
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -295,13 +285,12 @@ function PageInner() {
     };
   }, [userId]);
 
-  // ====== เลือก/แก้จำนวน ======
   function toggleChar(id: number) {
     setSelChars((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : prev.length >= 3 ? prev : [...prev, id]));
   }
 
   function addOther(id: number) {
-    if (othersTotal >= 20) return; // กันระดับ UI
+    if (othersTotal >= 20) return;
     setSelOthers((prev) => {
       const totalPrev = Object.values(prev).reduce((a, b) => a + b, 0);
       if (totalPrev >= 20) return prev;
@@ -329,7 +318,7 @@ function PageInner() {
       name,
       characters: selChars,
       cards: Object.entries(selOthers).map(([id, count]) => ({
-        cardId: Number(id), // 1..3
+        cardId: Number(id),
         count: Number(count),
       })),
     };
@@ -341,9 +330,7 @@ function PageInner() {
     }
   }
 
-  // ========== FILTER: แสดงเฉพาะใบที่ "มี" + "ที่พรีฟิล" ==========
   const VISIBLE_CHAR_CARDS = useMemo(() => {
-    // รวม "ที่มีในคลัง" + "ที่ถูกเลือกไว้" (รองรับ id = 0)
     const show = new Set<number>();
     if (inv?.chars) {
       for (const [k, qty] of Object.entries(inv.chars)) {
@@ -362,6 +349,13 @@ function PageInner() {
   if (!loaded) {
     return (
       <main className="min-h-screen p-6">
+        <button
+          onClick={() => router.push("/")}
+          className="fixed left-4 top-4 z-50 px-3 py-1 rounded bg-red-600 hover:bg-red-500"
+          title="กลับหน้าแรก"
+        >
+          Exit
+        </button>
         <div className="opacity-70">Loading deck…</div>
       </main>
     );
@@ -369,6 +363,15 @@ function PageInner() {
 
   return (
     <main className="min-h-screen p-6 flex flex-col gap-6">
+      {/* Exit button */}
+      <button
+        onClick={() => router.push("/")}
+        className="fixed left-4 top-4 z-50 px-3 py-1 rounded bg-red-600 hover:bg-red-500"
+        title="กลับหน้าแรก"
+      >
+        Exit
+      </button>
+
       <header className="flex items-center gap-3">
         <input
           className="px-3 py-2 rounded bg-neutral-800 flex-1"

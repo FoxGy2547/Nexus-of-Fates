@@ -1,9 +1,11 @@
+// src/app/wish/page.tsx
 "use client";
 
 import React, { useEffect, useState } from "react";
 import Image from "next/image";
 import WishCinema, { WishItem } from "./WishCinema";
 import { JSX } from "react/jsx-runtime";
+import { useRouter } from "next/navigation";
 
 /* helpers */
 async function getJSON<T>(url: string): Promise<T> {
@@ -39,6 +41,7 @@ type WishPostResp = {
 };
 
 export default function WishPage(): JSX.Element {
+  const router = useRouter();
   const [userId, setUserId] = useState<number | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [rolling, setRolling] = useState<boolean>(false);
@@ -70,20 +73,19 @@ export default function WishPage(): JSX.Element {
     if (!userId) return alert("กรุณาเข้าสู่ระบบก่อนสุ่ม");
     setRolling(true);
 
-    // 1) เปิด overlay ก่อนเลย (meteor สีน้ำเงินเป็นค่าเริ่มต้น)
-    setCinemaItems([]); // == waiting mode
+    // 1) เปิด overlay ก่อนเลย
+    setCinemaItems([]); // waiting
 
     try {
-      // 2) ค่อยยิง API
+      // 2) ยิง API
       const r = await postJSON<WishPostResp>("/api/gacha/wish", { userId, times, autoConvertNP: true });
 
-      // 3) ป้อนผลเข้า overlay (จะสลับจาก intro → flip เอง)
+      // 3) ป้อนผลเข้า overlay
       setCinemaItems(r.items);
 
       // อัปเดตกระเป๋า
       setWallet({ np: r.user.nexusPoint, deal: r.user.nexusDeal, pity5: r.user.pity5 });
     } catch (e) {
-      // ถ้าพัง ปิด overlay แล้วแจ้งเตือน
       setCinemaItems(null);
       alert(e instanceof Error ? e.message : String(e));
     } finally {
@@ -93,6 +95,15 @@ export default function WishPage(): JSX.Element {
 
   return (
     <main className="min-h-screen p-6">
+      {/* Exit button */}
+      <button
+        onClick={() => router.push("/")}
+        className="fixed left-4 top-4 z-50 px-3 py-1 rounded bg-red-600 hover:bg-red-500"
+        title="กลับหน้าแรก"
+      >
+        Exit
+      </button>
+
       <section className="max-w-5xl mx-auto rounded-2xl p-5 bg-gradient-to-b from-[#0b1220] to-[#0b0f1a] border border-white/10">
         {/* Header */}
         <div className="flex items-center gap-2 mb-3">
@@ -156,7 +167,7 @@ export default function WishPage(): JSX.Element {
       {/* Overlay cinema */}
       <WishCinema
         open={!!cinemaItems}
-        results={cinemaItems || []}   // [] = waiting mode
+        results={cinemaItems || []}
         onDone={() => setCinemaItems(null)}
       />
     </main>

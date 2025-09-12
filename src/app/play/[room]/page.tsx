@@ -3,7 +3,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import {
   useGame,
   type ClientState,
@@ -65,8 +65,6 @@ const ELEMENT_ICON: Record<string, string> = {
 };
 
 /* ===================== image helper (ดึงจาก cards.json) ===================== */
-
-/** CODE → "Pretty Name" (BLAZE_KNIGHT -> Blaze Knight) */
 function codeToPrettyName(code: string): string {
   return (code || "")
     .split("_")
@@ -74,34 +72,14 @@ function codeToPrettyName(code: string): string {
     .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
     .join(" ");
 }
-
-/** map จาก code → art file (ตัวอักษรใหญ่หมดเพื่อเทียบแบบไม่งอแง) */
-const CHAR_ART = new Map<string, string>(
-  cardsData.characters.map((c) => [c.code.toUpperCase(), c.art]),
-);
-const SUPP_ART = new Map<string, string>(
-  cardsData.supports.map((c) => [c.code.toUpperCase(), c.art]),
-);
-const EVENT_ART = new Map<string, string>(
-  cardsData.events.map((c) => [c.code.toUpperCase(), c.art]),
-);
-
-/** คืน path รูปที่ถูกต้องตามชนิดการ์ด พร้อม encodeURI กันช่องว่าง */
+const CHAR_ART = new Map<string, string>(cardsData.characters.map((c) => [c.code.toUpperCase(), c.art]));
+const SUPP_ART = new Map<string, string>(cardsData.supports.map((c) => [c.code.toUpperCase(), c.art]));
+const EVENT_ART = new Map<string, string>(cardsData.events.map((c) => [c.code.toUpperCase(), c.art]));
 function imagePathByCode(code: string): string {
   const key = code.toUpperCase();
-  if (CHAR_ART.has(key)) {
-    const art = CHAR_ART.get(key)!;
-    return encodeURI(`/char_cards/${art}`);
-  }
-  if (SUPP_ART.has(key)) {
-    const art = SUPP_ART.get(key)!;
-    return encodeURI(`/cards/${art}`);
-  }
-  if (EVENT_ART.has(key)) {
-    const art = EVENT_ART.get(key)!;
-    return encodeURI(`/cards/${art}`);
-  }
-  // fallback เผื่ออนาคตมี code ใหม่แต่ยังไม่ใส่ art ในไฟล์
+  if (CHAR_ART.has(key)) return encodeURI(`/char_cards/${CHAR_ART.get(key)!}`);
+  if (SUPP_ART.has(key)) return encodeURI(`/cards/${SUPP_ART.get(key)!}`);
+  if (EVENT_ART.has(key)) return encodeURI(`/cards/${EVENT_ART.get(key)!}`);
   const file = `${codeToPrettyName(code)}.png`;
   return encodeURI(`/cards/${file}`);
 }
@@ -182,9 +160,7 @@ const textShadow = "0 1px 2px rgba(0,0,0,.9),0 0 2px rgba(0,0,0,.7)";
 
 function CardBase({ code }: { code: string }) {
   const src = imagePathByCode(code);
-  return (
-    <Image src={src} alt={code} fill className="object-cover rounded-lg" unoptimized />
-  );
+  return <Image src={src} alt={code} fill className="object-cover rounded-lg" unoptimized />;
 }
 function CircleOverlay({ cx, cy, dPct, children }: { cx: number; cy: number; dPct: number; children: React.ReactNode }) {
   const size = `${dPct}%`;
@@ -197,19 +173,7 @@ function CircleOverlay({ cx, cy, dPct, children }: { cx: number; cy: number; dPc
     </div>
   );
 }
-function NameOverlay({
-  cx,
-  cy,
-  wPct,
-  hPct,
-  children,
-}: {
-  cx: number;
-  cy: number;
-  wPct: number;
-  hPct: number;
-  children: React.ReactNode;
-}) {
+function NameOverlay({ cx, cy, wPct, hPct, children }: { cx: number; cy: number; wPct: number; hPct: number; children: React.ReactNode }) {
   return (
     <div
       className="absolute flex items-center justify-center text-center truncate"
@@ -410,6 +374,7 @@ function PhaseOverlay({ show, phase }: { show: boolean; phase: number }) {
 
 /* ===================== PAGE ===================== */
 export default function PlayRoomPage() {
+  const router = useRouter();
   const params = useParams<{ room: string }>();
   const roomId = useMemo(() => String(params.room || "").toUpperCase(), [params.room]);
 
@@ -524,6 +489,15 @@ export default function PlayRoomPage() {
   /* ---------- render ---------- */
   return (
     <main className="min-h-screen p-6 flex flex-col gap-6">
+      {/* Exit button */}
+      <button
+        onClick={() => router.push("/")}
+        className="fixed left-4 top-4 z-50 px-3 py-1 rounded bg-red-600 hover:bg-red-500"
+        title="กลับหน้าแรก"
+      >
+        Exit
+      </button>
+
       {/* overlays */}
       <CoinOverlay show={coinOpen} spinning={coinSpin} winner={coinWinner} you={yourSide} onDone={onCoinDone} />
       <PhaseOverlay show={phaseShow} phase={cs?.phaseNo ?? 1} />
@@ -634,7 +608,6 @@ export default function PlayRoomPage() {
               >
                 Ultimate (5)
               </button>
-              {/* End Phase ถูกปิดไว้ตามกติกาใหม่ (โจมตีเท่านั้นที่เปลี่ยนเทิร์น) */}
               <button className="px-3 py-1 rounded bg-emerald-700 opacity-40 cursor-not-allowed" disabled onClick={() => endPhase()}>
                 End Phase
               </button>
