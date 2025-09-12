@@ -98,7 +98,7 @@ export default function WishPage(): JSX.Element {
       {/* Exit button */}
       <button
         onClick={() => router.push("/")}
-        className="fixed left-4 top-4 z-50 px-3 py-1 rounded bg-red-600 hover:bg-red-500"
+        className="px-4 py-2 rounded bg-red-600 hover:bg-red-500"
         title="กลับหน้าแรก"
       >
         Exit
