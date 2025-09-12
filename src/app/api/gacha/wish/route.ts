@@ -177,7 +177,7 @@ export async function POST(req: Request) {
     const w = await getWallet(userId);
 
     // แปลง Nexus Point → Nexus Deal อัตโนมัติถ้าจำเป็น
-    let needDeals = times;
+    const needDeals = times;
     if (w.nexusDeal < needDeals && autoConvertNP) {
       const lack = needDeals - w.nexusDeal;
       if (w.nexusPoint >= lack) {

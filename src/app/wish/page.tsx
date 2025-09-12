@@ -1,3 +1,4 @@
+// src/app/wish/page.tsx
 "use client";
 
 import React, { useEffect, useState } from "react";
@@ -24,18 +25,9 @@ async function postJSON<T>(url: string, body: unknown): Promise<T> {
   return (txt ? JSON.parse(txt) : ({} as T)) as T;
 }
 
-/** ฟังก์ชันเดียวกับใน WishCinema เพื่อให้หน้าผลลัพธ์โหลดรูปได้ครบ */
-function imgSrc(it: Pick<WishItem, "art" | "artUrl" | "kind" | "name">): string {
-  if (it.art && it.art.trim()) {
-    const base = it.kind === "character" ? "/char_cards/" : "/cards/";
-    return encodeURI(base + it.art);
-  }
-  if (it.artUrl && it.artUrl.trim()) return encodeURI(it.artUrl);
-  if (it.name && it.name.trim()) {
-    const base = it.kind === "character" ? "/char_cards/" : "/cards/";
-    return encodeURI(`${base}${it.name.trim()}.png`);
-  }
-  return "/cards/blank.png";
+/** path รูปจาก art + kind (เข้ารหัสช่องว่าง/อักษรพิเศษ) */
+function cardImg(art: string, kind: WishItem["kind"]): string {
+  return encodeURI(kind === "character" ? `/char_cards/${art}` : `/cards/${art}`);
 }
 
 /* types */
@@ -53,10 +45,12 @@ export default function WishPage(): JSX.Element {
   const [rolling, setRolling] = useState<boolean>(false);
 
   const [wallet, setWallet] = useState<{ np: number; deal: number; pity5: number }>({
-    np: 0, deal: 0, pity5: 0,
+    np: 0,
+    deal: 0,
+    pity5: 0,
   });
 
-  const [results, setResults] = useState<WishItem[]>([]);
+  // ชุดไอเท็มที่จะส่งเข้าแอนิเมชัน (overlay)
   const [cinemaItems, setCinemaItems] = useState<WishItem[] | null>(null);
 
   useEffect(() => {
@@ -83,9 +77,13 @@ export default function WishPage(): JSX.Element {
     setRolling(true);
     try {
       const r = await postJSON<WishPostResp>("/api/gacha/wish", {
-        userId, times, autoConvertNP: true,
+        userId,
+        times,
+        autoConvertNP: true,
       });
-      setCinemaItems(r.items); // เปิดแอนิเมชัน
+      // เปิดแอนิเมชัน (ไม่มีการโชว์ผลด้านล่างแล้ว)
+      setCinemaItems(r.items);
+      // อัปเดตกระเป๋า
       setWallet({ np: r.user.nexusPoint, deal: r.user.nexusDeal, pity5: r.user.pity5 });
     } catch (e) {
       alert(e instanceof Error ? e.message : String(e));
@@ -109,24 +107,33 @@ export default function WishPage(): JSX.Element {
           <div className="space-y-2">
             <h1 className="text-3xl font-bold">Wanderlust Invocation</h1>
             <p className="opacity-80 text-sm">
-              Standard wishes have no time limit. Every 10 wishes is guaranteed to include at least one 4★ or higher item.
+              Standard wishes have no time limit. Every 10 wishes is guaranteed to include at least one 4★
+              or higher item.
             </p>
-            <button className="text-xs opacity-70 hover:opacity-100 underline underline-offset-4">View Details for more.</button>
+            <button className="text-xs opacity-70 hover:opacity-100 underline underline-offset-4">
+              View Details for more.
+            </button>
 
             <div className="mt-4 text-sm opacity-80">
-              <span className="mr-4">Nexus Point: <b>{wallet.np}</b></span>
-              <span className="mr-4">Nexus Deal: <b>{wallet.deal}</b></span>
-              <span>Pity5: <b>{wallet.pity5}</b></span>
+              <span className="mr-4">
+                Nexus Point: <b>{wallet.np}</b>
+              </span>
+              <span className="mr-4">
+                Nexus Deal: <b>{wallet.deal}</b>
+              </span>
+              <span>
+                Pity5: <b>{wallet.pity5}</b>
+              </span>
             </div>
           </div>
 
-        {/* Banner preview */}
+          {/* banner */}
           <div className="relative rounded-xl overflow-hidden bg-gradient-to-br from-indigo-700/20 to-sky-500/10 border border-white/10 min-h-[180px]">
             <div className="absolute right-3 bottom-3 text-xs bg-black/60 px-2 py-1 rounded text-amber-300">
               ★★★★★ Windblade Duelist
             </div>
             <Image
-              src={imgSrc({ art: "Windblade Duelist.png", kind: "character", artUrl: "", name: "Windblade Duelist" })}
+              src={cardImg("Windblade Duelist.png", "character")}
               alt="Windblade Duelist"
               fill
               className="object-contain opacity-70"
@@ -156,43 +163,13 @@ export default function WishPage(): JSX.Element {
             <div className="text-xs opacity-80">ใช้ Nexus Deal ×10</div>
           </button>
         </div>
-
-        {/* Results after animation */}
-        {results.length > 0 && (
-          <div className="mt-10">
-            <div className="text-sm opacity-70 mb-3">Results</div>
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
-              {results.map((it, idx) => (
-                <div
-                  key={`${it.kind}-${it.id}-${idx}`}
-                  className={`relative border rounded-lg p-2 bg-black/30 ${
-                    it.rarity === 5 ? "border-amber-400" : it.rarity === 4 ? "border-violet-400" : "border-sky-400"
-                  }`}
-                >
-                  <div className="relative aspect-[2/3] rounded overflow-hidden bg-neutral-950">
-                    <Image src={imgSrc(it)} alt={it.code} fill className="object-contain" unoptimized />
-                  </div>
-                  <div className="mt-1 text-xs truncate">
-                    <span className={it.rarity === 5 ? "text-amber-300" : it.rarity === 4 ? "text-violet-300" : "text-sky-300"}>
-                      {"★".repeat(it.rarity)}
-                    </span>{" "}
-                    {it.name || it.code}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
       </section>
 
-      {/* Overlay cinema */}
+      {/* Overlay cinema (ไม่มีส่วน Results ข้างล่างแล้ว) */}
       <WishCinema
         open={!!cinemaItems}
         results={cinemaItems || []}
-        onDone={() => {
-          if (cinemaItems) setResults(cinemaItems);
-          setCinemaItems(null);
-        }}
+        onDone={() => setCinemaItems(null)}
       />
     </main>
   );
