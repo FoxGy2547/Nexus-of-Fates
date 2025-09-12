@@ -83,6 +83,10 @@ async function postJSON<T>(url: string, body: unknown): Promise<T> {
   return (txt ? JSON.parse(txt) : ({} as T)) as T;
 }
 
+/** แปลงไอดีการ์ดอื่นๆ (support/event) ระหว่าง UI ↔ DB */
+const toUiOtherId = (dbId: number) => (dbId >= 101 ? dbId - 100 : dbId);
+const toDbOtherId = (uiId: number) => (uiId >= 101 ? uiId : uiId + 100);
+
 /** แปลง payload inventory เป็น {chars, others}
  *  รองรับ 2 รูปแบบ:
  *   A) row: { user_id, char_1..char_12, card_1..card_3 }
@@ -222,8 +226,12 @@ function PageInner() {
         if (deckResp.deck) {
           setName(deckResp.deck.name || "My Deck");
           setSelChars(deckResp.deck.characters ?? []);
+          // 🔁 แปลง cardId จาก DB (101..103) → UI (1..3) แล้วเติมจำนวน
           const rec: Record<number, number> = {};
-          for (const it of deckResp.deck.cards ?? []) rec[it.cardId] = it.count;
+          for (const it of deckResp.deck.cards ?? []) {
+            const uiId = toUiOtherId(it.cardId);
+            rec[uiId] = (rec[uiId] ?? 0) + it.count;
+          }
           setSelOthers(rec);
         } else {
           setSelChars([]);
@@ -259,7 +267,11 @@ function PageInner() {
       userId,
       name,
       characters: selChars,
-      cards: Object.entries(selOthers).map(([id, count]) => ({ cardId: Number(id), count: Number(count) })),
+      // 🔁 แปลงกลับ UI (1..3) → DB (101..103)
+      cards: Object.entries(selOthers).map(([id, count]) => ({
+        cardId: toDbOtherId(Number(id)),
+        count: Number(count),
+      })),
     };
     try {
       await postJSON("/api/deck", body);
