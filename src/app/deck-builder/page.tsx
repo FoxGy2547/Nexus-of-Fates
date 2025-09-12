@@ -1,3 +1,4 @@
+// src/app/deck-builder/page.tsx
 "use client";
 
 import React, { Suspense, useEffect, useMemo, useState } from "react";
@@ -78,7 +79,7 @@ async function postJSON<T>(url: string, body: unknown): Promise<T> {
   return (txt ? JSON.parse(txt) : ({} as T)) as T;
 }
 
-/** -------- INVENTORY -------- (เหมือนเดิม) -------- */
+/** -------- INVENTORY -------- */
 function normalizeInventory(raw: unknown): Inventory {
   const empty: Inventory = { userId: 0, chars: {}, others: {} };
   if (!raw || typeof raw !== "object") return empty;
@@ -142,7 +143,7 @@ function normalizeInventory(raw: unknown): Inventory {
   return inv;
 }
 
-/** -------- DECK -------- (เหมือนเดิม) -------- */
+/** -------- DECK -------- */
 function normalizeDeck(raw: unknown): { name: string; characters: number[]; others: Record<number, number> } {
   let deckObj: Record<string, unknown> | null = null;
 
@@ -324,23 +325,17 @@ function PageInner() {
     }
   }
 
-  const CHAR_CARDS = cardsData.characters.map((c) => ({ id: c.char_id, code: c.code, name: c.name, art: c.art }));
-  const OTHER_CARDS = [
-    ...cardsData.supports.map((s) => ({ id: s.id, code: s.code, name: s.name, art: s.art, kind: "support" as const })),
-    ...cardsData.events.map((e) => ({ id: e.id, code: e.code, name: e.name, art: e.art, kind: "event" as const })),
-  ];
-
   const VISIBLE_CHAR_CARDS = useMemo(() => {
     const show = new Set<number>();
     if (inv?.chars) for (const [k, qty] of Object.entries(inv.chars)) if ((qty ?? 0) > 0) show.add(Number(k));
     for (const id of selChars) show.add(id);
     return CHAR_CARDS.filter((c) => show.has(c.id));
-  }, [inv, selChars]);
+  }, [inv, selChars, CHAR_CARDS]);
 
   const VISIBLE_OTHER_CARDS = useMemo(() => {
     if (!inv) return [] as typeof OTHER_CARDS;
     return OTHER_CARDS.filter((o) => (inv.others?.[o.id] ?? 0) > 0);
-  }, [inv]);
+  }, [inv, OTHER_CARDS]);
 
   if (!loaded) {
     return (
@@ -439,8 +434,12 @@ function PageInner() {
                 className={`relative border ${selectedClass} p-3 rounded-xl bg-black/20 hover:bg-black/30`}
                 style={{ width: CARD_W }}
               >
-                <div className="absolute left-2 top-2 z-20"><Badge>#{o.id}</Badge></div>
-                <div className="absolute left-12 top-2 z-20"><Badge>owned {owned}</Badge></div>
+                <div className="absolute left-2 top-2 z-20">
+                  <Badge>#{o.id}</Badge>
+                </div>
+                <div className="absolute left-12 top-2 z-20">
+                  <Badge>owned {owned}</Badge>
+                </div>
 
                 {picked > 0 && (
                   <button
