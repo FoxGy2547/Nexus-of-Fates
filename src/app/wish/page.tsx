@@ -1,130 +1,202 @@
-// src/app/wish/page.tsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { useSession } from "next-auth/react";
+import React, { useEffect, useState } from "react";
 import Image from "next/image";
-import WishOverlay, { type WishResult } from "./WishOverlay";
-import { useRouter } from "next/navigation";
+import { JSX } from "react/jsx-runtime";
 
-/* ===== helpers ===== */
-async function postJSON<T>(url: string, body: unknown): Promise<T> {
-  const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+/* ================= helpers ================ */
+async function getJSON<T>(url: string): Promise<T> {
+  const r = await fetch(url, { cache: "no-store" });
   const txt = await r.text().catch(() => "");
   if (!r.ok) throw new Error(txt || r.statusText);
   return (txt ? JSON.parse(txt) : ({} as T)) as T;
 }
-function stableUserId(session: ReturnType<typeof useSession>["data"]) {
-  const raw = (session?.user as { id?: string | null } | null)?.id ?? null;
-  if (raw) return Number(raw);
-  // ถ้าบ้านไหนใช้ users.id เป็น int (จาก Discord sync) จะต้องล็อกอินเพื่อสุ่ม
-  return 0;
+
+async function postJSON<T>(url: string, body: unknown): Promise<T> {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    cache: "no-store",
+    body: JSON.stringify(body),
+  });
+  const txt = await r.text().catch(() => "");
+  if (!r.ok) throw new Error(txt || r.statusText);
+  return (txt ? JSON.parse(txt) : ({} as T)) as T;
 }
 
-/* ===== types ===== */
-type WishResp = { ok: boolean; results: WishResult[] };
+/* ================= types ================ */
+type MeResp = { ok: boolean; user?: { id: number } };
 
-/* ===== page ===== */
-export default function WishPage() {
-  const { data: session } = useSession();
-  const router = useRouter();
-  const userId = useMemo(() => stableUserId(session), [session]);
+type WalletResp = {
+  ok: boolean;
+  user: { nexusPoint: number; nexusDeal: number; pity5: number };
+};
 
-  const [pending, setPending] = useState(false);
-  const [overlay, setOverlay] = useState<WishResult[] | null>(null);
+type WishItem = {
+  rarity: 3 | 4 | 5;
+  id: number;
+  code: string;
+  name: string;
+  kind: "character" | "support" | "event";
+  artUrl: string;
+};
 
+type WishPostResp = {
+  ok: boolean;
+  items: WishItem[];
+  user: { nexusPoint: number; nexusDeal: number; pity5: number };
+};
+
+/* ================ page ================ */
+export default function WishPage(): JSX.Element {
+  const [userId, setUserId] = useState<number | null>(null);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [rolling, setRolling] = useState<boolean>(false);
+
+  const [wallet, setWallet] = useState<{ np: number; deal: number; pity5: number }>({
+    np: 0,
+    deal: 0,
+    pity5: 0,
+  });
+
+  const [results, setResults] = useState<WishItem[]>([]);
+
+  // โหลด user id + wallet
   useEffect(() => {
-    // ไม่ล็อกอินให้เด้งไปหน้าแรก (หรือจะให้สุ่ม guest ก็เพิ่มเองได้)
-    if (!userId) return;
-  }, [userId]);
+    (async () => {
+      try {
+        setLoading(true);
+        const me = await getJSON<MeResp>("/api/me");
+        const uid = Number(me.user?.id ?? 0);
+        setUserId(uid || null);
 
-  async function doWish(count: 1 | 10) {
-    if (!userId) {
-      alert("ล็อกอินก่อนค่อยสุ่มสิ!");
-      return;
-    }
+        if (uid) {
+          const w = await getJSON<WalletResp>(`/api/gacha/wish?userId=${uid}`);
+          setWallet({ np: w.user.nexusPoint, deal: w.user.nexusDeal, pity5: w.user.pity5 });
+        }
+      } catch (e) {
+        // เงียบไว้ก็ได้ จะได้ไม่เด้ง alert ตอนยังไม่ล็อกอิน
+        console.error(e);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  const doWish = async (times: 1 | 10) => {
+    if (!userId) return alert("กรุณาเข้าสู่ระบบก่อนสุ่ม");
+    setRolling(true);
     try {
-      setPending(true);
-      const res = await postJSON<WishResp>("/api/gacha/wish", { count, userId });
-      setOverlay(res.results);
-    } catch (e: unknown) {
+      const r = await postJSON<WishPostResp>("/api/gacha/wish", {
+        userId,
+        times,
+        autoConvertNP: true, // ให้แลก NP -> Deal อัตโนมัติถ้าจำเป็น
+      });
+      setResults(r.items);
+      setWallet({ np: r.user.nexusPoint, deal: r.user.nexusDeal, pity5: r.user.pity5 });
+    } catch (e) {
       alert(e instanceof Error ? e.message : String(e));
     } finally {
-      setPending(false);
+      setRolling(false);
     }
-  }
+  };
 
   return (
-    <main className="min-h-[100dvh] bg-gradient-to-b from-[#10192a] to-[#0a0f1a] text-white p-6">
-      {/* Header ของตู้แบบเรียบๆ พอให้ฟีล */}
-      <div className="mx-auto max-w-5xl rounded-2xl overflow-hidden border border-white/10 bg-white/[0.02]">
-        <div className="grid md:grid-cols-[1.1fr,1.2fr]">
-          <div className="p-6">
-            <div className="inline-flex items-center gap-2 px-2 py-1 bg-white/10 rounded-full text-[12px]">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-              Standard Wish
-            </div>
-            <h2 className="text-3xl font-bold mt-3">Wanderlust Invocation</h2>
-            <p className="text-white/70 mt-3 text-[14px] leading-6">
-              Standard wishes have no time limit. Every 10 wishes is guaranteed to include at least one 4★ or
-              higher item.
+    <main className="min-h-screen p-6">
+      <section className="max-w-5xl mx-auto rounded-2xl p-5 bg-gradient-to-b from-[#0b1220] to-[#0b0f1a] border border-white/10">
+        {/* Header */}
+        <div className="flex items-center gap-2 mb-3">
+          <span className="inline-flex items-center gap-2 rounded-full bg-emerald-700/20 px-3 py-1 text-emerald-300 text-xs">
+            <span className="w-2 h-2 rounded-full bg-emerald-400" />
+            Standard Wish
+          </span>
+        </div>
+
+        <div className="grid md:grid-cols-2 gap-6 items-stretch">
+          <div className="space-y-2">
+            <h1 className="text-3xl font-bold">Wanderlust Invocation</h1>
+            <p className="opacity-80 text-sm">
+              Standard wishes have no time limit. Every 10 wishes is guaranteed to include at least one 4★ or higher item.
             </p>
-            <button
-              className="mt-4 text-[12px] underline underline-offset-4 text-white/70 hover:text-white"
-              onClick={() => alert("ไว้ค่อยทำหน้า Details นะ")}
-            >
+            <button className="text-xs opacity-70 hover:opacity-100 underline underline-offset-4">
               View Details for more.
             </button>
+
+            <div className="mt-4 text-sm opacity-80">
+              <span className="mr-4">Nexus Point: <b>{wallet.np}</b></span>
+              <span className="mr-4">Nexus Deal: <b>{wallet.deal}</b></span>
+              <span>Pity5: <b>{wallet.pity5}</b></span>
+            </div>
           </div>
-          <div className="relative h-[220px] md:h-[260px] bg-gradient-to-br from-indigo-600/20 to-sky-400/10">
+
+          <div className="relative rounded-xl overflow-hidden bg-gradient-to-br from-indigo-700/20 to-sky-500/10 border border-white/10 min-h-[180px]">
+            {/* รูป banner ตัวหน้าตู้ (วางภาพจริงภายหลังได้) */}
+            <div className="absolute right-3 bottom-3 text-xs bg-black/60 px-2 py-1 rounded text-amber-300">
+              ★★★★★ Windblade Duelist
+            </div>
             <Image
               src="/char_cards/windblade_duelist.png"
               alt="Windblade Duelist"
               fill
-              className="object-contain p-4"
+              className="object-contain opacity-70"
               unoptimized
             />
-            <div className="absolute right-3 bottom-3 text-[12px] px-2 py-1 rounded-full bg-black/50 border border-white/10">
-              <span className="mr-2 text-[#f6c14a]">★★★★★</span> Windblade Duelist
-            </div>
           </div>
         </div>
-      </div>
 
-      {/* ปุ่มสุ่ม */}
-      <div className="mx-auto max-w-5xl flex items-center justify-center gap-6 mt-10">
-        <button
-          className="px-8 py-3 rounded-xl bg-white/10 hover:bg-white/15 border border-white/10 disabled:opacity-50"
-          onClick={() => doWish(1)}
-          disabled={pending}
-        >
-          <div className="text-center">
-            <div className="font-semibold">Wish ×1</div>
-            <div className="text-[11px] opacity-70 mt-0.5">ใช้ Nexus Deal ×1</div>
-          </div>
-        </button>
-        <button
-          className="px-8 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50"
-          onClick={() => doWish(10)}
-          disabled={pending}
-        >
-          <div className="text-center">
-            <div className="font-semibold">Wish ×10</div>
-            <div className="text-[11px] opacity-90 mt-0.5">ใช้ Nexus Deal ×10</div>
-          </div>
-        </button>
-      </div>
+        {/* buttons */}
+        <div className="mt-10 flex gap-6 justify-center">
+          <button
+            onClick={() => doWish(1)}
+            disabled={!userId || loading || rolling}
+            className="px-8 py-3 rounded-xl bg-neutral-800 border border-white/10 hover:border-white/20 disabled:opacity-40"
+          >
+            Wish ×1
+            <div className="text-xs opacity-70">ใช้ Nexus Deal ×1</div>
+          </button>
 
-      {/* โอเวอร์เลย์อนิเมชัน */}
-      {overlay && (
-        <WishOverlay
-          results={overlay}
-          onClose={() => {
-            setOverlay(null);
-            // อยากรีเฟรชหน้าหรือไปหน้า history ค่อยเติม
-          }}
-        />
-      )}
+          <button
+            onClick={() => doWish(10)}
+            disabled={!userId || loading || rolling}
+            className="px-8 py-3 rounded-xl bg-emerald-700/30 border border-emerald-500/50 hover:bg-emerald-700/40 disabled:opacity-40"
+          >
+            Wish ×10
+            <div className="text-xs opacity-80">ใช้ Nexus Deal ×10</div>
+          </button>
+        </div>
+
+        {/* แสดงผลลัพธ์แบบง่าย ๆ (ไว้ต่อยอดทำแอนิเมชัน) */}
+        {results.length > 0 && (
+          <div className="mt-10">
+            <div className="text-sm opacity-70 mb-3">Results</div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
+              {results.map((it, idx) => (
+                <div
+                  key={`${it.kind}-${it.id}-${idx}`}
+                  className={`relative border rounded-lg p-2 bg-black/30 ${
+                    it.rarity === 5
+                      ? "border-amber-400"
+                      : it.rarity === 4
+                      ? "border-violet-400"
+                      : "border-sky-400"
+                  }`}
+                  title={`#${it.id} ${it.name}`}
+                >
+                  <div className="relative aspect-[2/3] rounded overflow-hidden bg-neutral-900">
+                    <Image src={it.artUrl} alt={it.code} fill className="object-contain" unoptimized />
+                  </div>
+                  <div className="mt-1 text-xs truncate">
+                    <span className={it.rarity === 5 ? "text-amber-300" : it.rarity === 4 ? "text-violet-300" : "text-sky-300"}>
+                      {"★".repeat(it.rarity)}
+                    </span>{" "}
+                    {it.name || it.code}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </section>
     </main>
   );
 }
