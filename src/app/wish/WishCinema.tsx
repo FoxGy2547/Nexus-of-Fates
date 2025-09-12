@@ -117,9 +117,12 @@ export default function WishCinema({ open, results, onDone }: Props) {
 
           {/* ข้อความรอกลางจอ (เฉพาะตอนยังไม่มีผล) */}
           {!hasData && (
-            <div className="wait-center" aria-live="polite">
+            <div className="wait-center" role="status" aria-live="polite">
               <div className="spinner" />
-              <div className="wait-text">รอแปปนึงเน้อ</div>
+              <div className="wait-lines">
+                <div className="wait-title">Just a moment</div>
+                <div className="wait-sub">รอแปปนึงเน้อ</div>
+              </div>
             </div>
           )}
         </>
@@ -189,7 +192,9 @@ export default function WishCinema({ open, results, onDone }: Props) {
         /* wait text */
         .wait-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;z-index:68;pointer-events:none}
         .spinner{width:22px;height:22px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:999px;animation:spin .9s linear infinite}
-        .wait-text{color:#fff;font-weight:600;text-shadow:0 2px 6px rgba(0,0,0,.5)}
+        .wait-lines{display:flex;flex-direction:column;align-items:center;gap:4px}
+        .wait-title{color:#fff;font-weight:700;font-size:18px;text-shadow:0 2px 6px rgba(0,0,0,.5)}
+        .wait-sub{color:#fff;font-weight:600;opacity:.9;text-shadow:0 2px 6px rgba(0,0,0,.5)}
 
         /* meteor */
         .meteor{position:absolute;inset:0;overflow:hidden}
