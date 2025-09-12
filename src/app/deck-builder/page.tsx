@@ -52,8 +52,15 @@ type SaveBody = {
   cards: { cardId: number; count: number }[];
 };
 
+/* -------- deck response types (หลีกเลี่ยง any) -------- */
+type DeckData = {
+  name?: string;
+  characters?: number[];
+  cards?: { cardId: number; count: number }[];
+  [key: string]: unknown; // รองรับทรง column อย่าง card1..card15, card_char1..3
+};
 type DeckResp =
-  | { ok: true; deck: Record<string, any> } // รองรับทั้งทรง array และทรง column
+  | { ok: true; deck: DeckData }
   | { ok: true; deck?: undefined };
 
 type MeResp = { ok: boolean; user?: { id: number } };
@@ -95,9 +102,9 @@ function normalizeInventory(raw: unknown): Inventory {
   const top = raw as Record<string, unknown>;
 
   // B) items[]
-  if (Array.isArray(top.items)) {
-    const inv: Inventory = { userId: Number(top.userId ?? 0) || 0, chars: {}, others: {} };
-    for (const it of top.items as Array<Record<string, unknown>>) {
+  if (Array.isArray((top as Record<string, unknown>).items)) {
+    const inv: Inventory = { userId: Number((top as Record<string, unknown>).userId ?? 0) || 0, chars: {}, others: {} };
+    for (const it of (top as { items: Array<Record<string, unknown>> }).items) {
       const id = Number(it.cardId ?? 0);
       const qty = Number(it.qty ?? 0);
       const kind = String(it.kind ?? "");
@@ -110,10 +117,12 @@ function normalizeInventory(raw: unknown): Inventory {
 
   // A) row เดี่ยว
   const row: Record<string, unknown> =
-    typeof top.row === "object" && top.row ? (top.row as Record<string, unknown>) : top;
+    typeof (top as Record<string, unknown>).row === "object" && (top as Record<string, unknown>).row
+      ? ((top as Record<string, unknown>).row as Record<string, unknown>)
+      : (top as Record<string, unknown>);
 
   const inv: Inventory = {
-    userId: Number(row.user_id ?? 0) || Number((top.userId as number) ?? 0) || 0,
+    userId: Number(row.user_id ?? 0) || Number(((top as Record<string, unknown>).userId as number) ?? 0) || 0,
     chars: {},
     others: {},
   };
@@ -175,8 +184,12 @@ function PageInner() {
   const [userId, setUserId] = useState<number>(qsUserId);
   const [name, setName] = useState<string>("My Deck");
   const [inv, setInv] = useState<Inventory | null>(null);
+
+  // 👉 ค่า “ที่เลือกไว้”
   const [selChars, setSelChars] = useState<number[]>([]);
   const [selOthers, setSelOthers] = useState<Record<number, number>>({});
+  const [loaded, setLoaded] = useState<boolean>(false); // กันเฟรมว่าง
+
   const othersTotal = useMemo(() => Object.values(selOthers).reduce((a, b) => a + b, 0), [selOthers]);
 
   // ถ้าไม่มี ?userId= ลอง /api/me
@@ -198,15 +211,21 @@ function PageInner() {
     if (qsUserId && qsUserId !== userId) setUserId(qsUserId);
   }, [qsUserId, userId]);
 
-  // โหลด inventory + deck → พรีฟิล
+  // โหลด inventory + deck → พรีฟิล แล้วค่อยเปิดหน้า
   useEffect(() => {
-    if (!userId) return;
+    let alive = true;
     (async () => {
+      setLoaded(false);
       try {
+        if (!userId) return;
+
         const [invRaw, deckResp] = await Promise.all([
           getJSON<unknown>(`/api/inventory?userId=${userId}`),
           getJSON<DeckResp>(`/api/deck?userId=${userId}`),
         ]);
+
+        if (!alive) return;
+
         const norm = normalizeInventory(invRaw);
         setInv(norm);
 
@@ -215,11 +234,10 @@ function PageInner() {
           setName(deck.name || "My Deck");
 
           // ===== Characters =====
-          let charIds: number[] = Array.isArray(deck.characters) ? deck.characters : [];
+          const charIds: number[] = Array.isArray(deck.characters) ? deck.characters : [];
           if (charIds.length === 0) {
-            // รองรับฟิลด์แบบ column: card_char1..3
             for (const key of ["card_char1", "card_char2", "card_char3"]) {
-              const v = Number(deck[key] ?? 0);
+              const v = Number((deck as Record<string, unknown>)[key] ?? 0);
               if (v) charIds.push(v);
             }
           }
@@ -234,21 +252,26 @@ function PageInner() {
               picked[uiId] = (picked[uiId] ?? 0) + Number(it.count ?? 0);
             }
           } else {
-            // รองรับฟิลด์แบบ column: card1..card15 (จำนวนใบ)
             for (let i = 1; i <= 15; i++) {
-              const n = Number(deck[`card${i}`] ?? 0);
+              const n = Number((deck as Record<string, unknown>)[`card${i}`] ?? 0);
               if (n > 0) picked[i] = n;
             }
           }
           setSelOthers(picked);
         } else {
+          // ไม่มีเด็ค -> ว่าง
           setSelChars([]);
           setSelOthers({});
         }
       } catch (e) {
         console.error("load deck/inventory failed:", e);
+      } finally {
+        if (alive) setLoaded(true);
       }
     })();
+    return () => {
+      alive = false;
+    };
   }, [userId]);
 
   // ตัวช่วยเลือก/แก้จำนวน
@@ -300,6 +323,15 @@ function PageInner() {
     return OTHER_CARDS.filter((o) => (inv.others?.[o.id] ?? 0) > 0);
   }, [inv]);
 
+  // กันเฟรมแรกที่ยังไม่มีข้อมูล เพื่อให้ขึ้นกรอบ/ตัวเลขตั้งแต่เฟรมแรก
+  if (!loaded) {
+    return (
+      <main className="min-h-screen p-6">
+        <div className="opacity-70">Loading deck…</div>
+      </main>
+    );
+  }
+
   return (
     <main className="min-h-screen p-6 flex flex-col gap-6">
       <header className="flex items-center gap-3">
@@ -324,7 +356,7 @@ function PageInner() {
 
         <div className="flex flex-wrap gap-3">
           {VISIBLE_CHAR_CARDS.map((c) => {
-            const owned = inv?.chars?.[c.id] ?? 0; // >0 เสมอ เพราะผ่าน filter
+            const owned = inv?.chars?.[c.id] ?? 0;
             const selected = selChars.includes(c.id);
             return (
               <button
@@ -360,7 +392,7 @@ function PageInner() {
 
         <div className="flex flex-wrap gap-3">
           {VISIBLE_OTHER_CARDS.map((o) => {
-            const owned = inv?.others?.[o.id] ?? 0; // >0 เสมอ
+            const owned = inv?.others?.[o.id] ?? 0;
             const picked = selOthers[o.id] ?? 0;
             const selectedClass = picked > 0 ? "border-emerald-500" : "border-white/10";
             return (
