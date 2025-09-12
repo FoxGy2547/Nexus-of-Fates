@@ -1,3 +1,4 @@
+// src/app/api/gacha/wish/route.ts
 import { NextResponse } from "next/server";
 import { supa } from "@/lib/supabase";
 
@@ -20,7 +21,7 @@ type PoolCard = { kind: "card"; id: number; rate: number };
 
 const POOL_5_FEATURED: PoolChar[] = [
   // ตัวหน้าตู้ (ตัวอย่าง id=4)
-  { kind: "char", id: 7, rate: 1 },
+  { kind: "char", id: 4, rate: 1 },
 ];
 
 const POOL_5_OFF_RATE: PoolChar[] = [
@@ -30,7 +31,7 @@ const POOL_5_OFF_RATE: PoolChar[] = [
   { kind: "char", id: 3, rate: 1 },
   { kind: "char", id: 5, rate: 1 },
   { kind: "char", id: 6, rate: 1 },
-  { kind: "char", id: 4, rate: 1 },
+  { kind: "char", id: 7, rate: 1 },
   { kind: "char", id: 8, rate: 1 },
   { kind: "char", id: 9, rate: 1 },
   { kind: "char", id: 10, rate: 1 },
@@ -175,8 +176,11 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "bad params" }, { status: 400 });
     }
 
-    // 1) โหลดกระเป๋า + pity
-    let { point, deal, pity5 } = await getUserWalletAndPity(userId);
+    // 1) โหลดกระเป๋า + pity (แยก const/let ให้ผ่าน prefer-const)
+    const wallet = await getUserWalletAndPity(userId);
+    let point = wallet.point;
+    let deal  = wallet.deal;
+    const pity5 = wallet.pity5;
 
     // 2) ใช้ Nexus Deal / แลกอัตโนมัติถ้าต้องการ
     const need = count - deal;
