@@ -1,4 +1,3 @@
-// src/app/wish/page.tsx
 "use client";
 
 import React, { useEffect, useState } from "react";
@@ -25,7 +24,7 @@ async function postJSON<T>(url: string, body: unknown): Promise<T> {
   return (txt ? JSON.parse(txt) : ({} as T)) as T;
 }
 
-/** path รูปจาก art + kind (เข้ารหัสช่องว่าง/อักษรพิเศษ) */
+/** path รูป */
 function cardImg(art: string, kind: WishItem["kind"]): string {
   return encodeURI(kind === "character" ? `/char_cards/${art}` : `/cards/${art}`);
 }
@@ -43,14 +42,9 @@ export default function WishPage(): JSX.Element {
   const [userId, setUserId] = useState<number | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [rolling, setRolling] = useState<boolean>(false);
+  const [wallet, setWallet] = useState<{ np: number; deal: number; pity5: number }>({ np: 0, deal: 0, pity5: 0 });
 
-  const [wallet, setWallet] = useState<{ np: number; deal: number; pity5: number }>({
-    np: 0,
-    deal: 0,
-    pity5: 0,
-  });
-
-  // ชุดไอเท็มที่จะส่งเข้าแอนิเมชัน (overlay)
+  // ไอเท็มของ overlay (เปิดทันทีแม้ยังไม่มีผล → ใส่ [] ชั่วคราว)
   const [cinemaItems, setCinemaItems] = useState<WishItem[] | null>(null);
 
   useEffect(() => {
@@ -75,17 +69,22 @@ export default function WishPage(): JSX.Element {
   const doWish = async (times: 1 | 10) => {
     if (!userId) return alert("กรุณาเข้าสู่ระบบก่อนสุ่ม");
     setRolling(true);
+
+    // 1) เปิด overlay ก่อนเลย (meteor สีน้ำเงินเป็นค่าเริ่มต้น)
+    setCinemaItems([]); // == waiting mode
+
     try {
-      const r = await postJSON<WishPostResp>("/api/gacha/wish", {
-        userId,
-        times,
-        autoConvertNP: true,
-      });
-      // เปิดแอนิเมชัน (ไม่มีการโชว์ผลด้านล่างแล้ว)
+      // 2) ค่อยยิง API
+      const r = await postJSON<WishPostResp>("/api/gacha/wish", { userId, times, autoConvertNP: true });
+
+      // 3) ป้อนผลเข้า overlay (จะสลับจาก intro → flip เอง)
       setCinemaItems(r.items);
+
       // อัปเดตกระเป๋า
       setWallet({ np: r.user.nexusPoint, deal: r.user.nexusDeal, pity5: r.user.pity5 });
     } catch (e) {
+      // ถ้าพัง ปิด overlay แล้วแจ้งเตือน
+      setCinemaItems(null);
       alert(e instanceof Error ? e.message : String(e));
     } finally {
       setRolling(false);
@@ -107,31 +106,20 @@ export default function WishPage(): JSX.Element {
           <div className="space-y-2">
             <h1 className="text-3xl font-bold">Wanderlust Invocation</h1>
             <p className="opacity-80 text-sm">
-              Standard wishes have no time limit. Every 10 wishes is guaranteed to include at least one 4★
-              or higher item.
+              Standard wishes have no time limit. Every 10 wishes is guaranteed to include at least one 4★ or higher item.
             </p>
-            <button className="text-xs opacity-70 hover:opacity-100 underline underline-offset-4">
-              View Details for more.
-            </button>
+            <button className="text-xs opacity-70 hover:opacity-100 underline underline-offset-4">View Details for more.</button>
 
             <div className="mt-4 text-sm opacity-80">
-              <span className="mr-4">
-                Nexus Point: <b>{wallet.np}</b>
-              </span>
-              <span className="mr-4">
-                Nexus Deal: <b>{wallet.deal}</b>
-              </span>
-              <span>
-                Pity5: <b>{wallet.pity5}</b>
-              </span>
+              <span className="mr-4">Nexus Point: <b>{wallet.np}</b></span>
+              <span className="mr-4">Nexus Deal: <b>{wallet.deal}</b></span>
+              <span>Pity5: <b>{wallet.pity5}</b></span>
             </div>
           </div>
 
           {/* banner */}
           <div className="relative rounded-xl overflow-hidden bg-gradient-to-br from-indigo-700/20 to-sky-500/10 border border-white/10 min-h-[180px]">
-            <div className="absolute right-3 bottom-3 text-xs bg-black/60 px-2 py-1 rounded text-amber-300">
-              ★★★★★ Windblade Duelist
-            </div>
+            <div className="absolute right-3 bottom-3 text-xs bg-black/60 px-2 py-1 rounded text-amber-300">★★★★★ Windblade Duelist</div>
             <Image
               src={cardImg("Windblade Duelist.png", "character")}
               alt="Windblade Duelist"
@@ -165,10 +153,10 @@ export default function WishPage(): JSX.Element {
         </div>
       </section>
 
-      {/* Overlay cinema (ไม่มีส่วน Results ข้างล่างแล้ว) */}
+      {/* Overlay cinema */}
       <WishCinema
         open={!!cinemaItems}
-        results={cinemaItems || []}
+        results={cinemaItems || []}   // [] = waiting mode
         onDone={() => setCinemaItems(null)}
       />
     </main>
