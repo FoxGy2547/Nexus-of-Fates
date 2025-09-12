@@ -171,7 +171,7 @@ export default function WishCinema({ open, results, onDone }: Props) {
 
       {/* ========== styles ========== */}
       <style jsx>{`
-        .wish-overlay{position:fixed;inset:0;z-index:60;background:radial-gradient(1200px 600px at 50% 30%,rgba(35,52,90,.8),rgba(6,10,18,.96) 55%);display:flex;align-items:center;justify-content:center;overflow:hidden;user-select:none}
+        .wish-overlay{position:fixed;inset:0;z-index:60;background:radial-gradient(1200px 600px at 50% 30%,rgba(35,52,90,.8),rgba(6,10,18,.96) 55%);display:flex;align-items:center;justify-content:center;overflow:hidden;user-select:none;backdrop-filter: blur(7px);}
         .wish-topbar{position:absolute;top:14px;right:14px;z-index:70}
         .btn-skip{padding:8px 12px;border-radius:10px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.2);color:#fff;font-weight:600}
 
