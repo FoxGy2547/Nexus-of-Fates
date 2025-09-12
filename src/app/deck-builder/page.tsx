@@ -57,7 +57,7 @@ type DeckData = {
   name?: string;
   characters?: number[];
   cards?: { cardId: number; count: number }[];
-  [key: string]: unknown; // รองรับทรง column อย่าง card1..card15, card_char1..3
+  [key: string]: unknown; // รองรับทรง column อย่าง card1..card20, char1..char3, card_char1..3
 };
 type DeckResp =
   | { ok: true; deck: DeckData }
@@ -137,9 +137,9 @@ function normalizeInventory(raw: unknown): Inventory {
   // map char_*/card_* → inv
   for (const [k, v] of Object.entries(row)) {
     if (typeof v === "number" || typeof v === "string") {
-      const mChar = /^char_(\d+)$/.exec(k);
+      const mChar = /^(char|card_char)_(\d+)$/.exec(k);
       if (mChar) {
-        inv.chars[Number(mChar[1])] = Number(v);
+        inv.chars[Number(mChar[2])] = Number(v);
         continue;
       }
       const mCard = /^card_(\d+)$/.exec(k);
@@ -185,7 +185,7 @@ function PageInner() {
   const [name, setName] = useState<string>("My Deck");
   const [inv, setInv] = useState<Inventory | null>(null);
 
-  // 👉 ค่า “ที่เลือกไว้”
+  // ค่า “ที่เลือกไว้”
   const [selChars, setSelChars] = useState<number[]>([]);
   const [selOthers, setSelOthers] = useState<Record<number, number>>({});
   const [loaded, setLoaded] = useState<boolean>(false); // กันเฟรมว่าง
@@ -236,7 +236,8 @@ function PageInner() {
           // ===== Characters =====
           const charIds: number[] = Array.isArray(deck.characters) ? deck.characters : [];
           if (charIds.length === 0) {
-            for (const key of ["card_char1", "card_char2", "card_char3"]) {
+            // รองรับทั้ง char1..3 และ card_char1..3
+            for (const key of ["char1", "char2", "char3", "card_char1", "card_char2", "card_char3"]) {
               const v = Number((deck as Record<string, unknown>)[key] ?? 0);
               if (v) charIds.push(v);
             }
@@ -252,9 +253,11 @@ function PageInner() {
               picked[uiId] = (picked[uiId] ?? 0) + Number(it.count ?? 0);
             }
           } else {
-            for (let i = 1; i <= 15; i++) {
-              const n = Number((deck as Record<string, unknown>)[`card${i}`] ?? 0);
-              if (n > 0) picked[i] = n;
+            // card1..card20 เก็บ "ชนิดการ์ด" 1/2/3 ต่อช่อง → สะสมตามค่า
+            for (let i = 1; i <= 20; i++) {
+              const key = `card${i}`;
+              const v = Number((deck as Record<string, unknown>)[key] ?? 0);
+              if (v > 0) picked[v] = (picked[v] ?? 0) + 1;
             }
           }
           setSelOthers(picked);
