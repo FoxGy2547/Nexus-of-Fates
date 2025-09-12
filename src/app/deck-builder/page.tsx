@@ -418,7 +418,7 @@ function PageInner() {
 
       {/* Supports & Events */}
       <section className="mt-6">
-        <div className="font-semibold mb-2">Supports & Events</div>
+        <div className="font-semibold mb-2">Supports & Events</div><div className="font-semibold mb-1">ทุกๆการ์ดที่เกิน 20-22 จะแปลงเป็น Nexus Point</div>
         {!inv && <div className="opacity-70 text-sm">Loading inventory…</div>}
 
         <div className="flex flex-wrap gap-3">
