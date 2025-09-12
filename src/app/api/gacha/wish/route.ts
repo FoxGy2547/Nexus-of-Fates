@@ -1,271 +1,249 @@
 import { NextResponse } from "next/server";
 import { supa } from "@/lib/supabase";
-import { POOLS, PoolItem } from "./pool";
+import cardsDataJson from "@/data/cards.json";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/* ============================= types ============================= */
-type WishBody = {
+/* ========================== types ========================== */
+type WishItem = {
+  id: number;
+  code: string;
+  name?: string | null;
+  art: string; // ชื่อไฟล์ตรงกับ public/*
+  kind: "character" | "support" | "event";
+  rarity: 3 | 4 | 5;
+};
+
+type MeWallet = {
+  nexusPoint: number;
+  nexusDeal: number;
+  pity5: number;
+  guarantee5: boolean;
+};
+
+type PostBody = {
   userId: number;
   times: 1 | 10;
-  // ถ้า deals ไม่พอและตั้ง true จะเอา Nexus Point มาแลกเพิ่มให้อัตโนมัติ
   autoConvertNP?: boolean;
 };
 
-type UserRow = {
-  id: number;
-  nexus_point: number | null;
-  nexus_deal: number | null;
-  wish_pity5: number | null; // pity นับตั้งแต่ได้ 5★ ล่าสุด
+/* ========================= cards pools =========================
+   ดึงจาก cards.json ตรง ๆ เพื่อให้ชื่อไฟล์ art ตรงกับ public */
+type CardsData = typeof cardsDataJson;
+
+const CD = cardsDataJson as CardsData;
+
+const CHAR_POOL = CD.characters.map((c) => ({
+  id: Number(c.char_id),
+  code: c.code,
+  name: c.name,
+  art: c.art, // เช่น "Windblade Duelist.png"
+  kind: "character" as const,
+}));
+
+// รวม supports + events เข้าด้วยกัน (อิง id 1..3 ตาม inventory: card_1..card_3)
+const OTHER_POOL = [
+  ...CD.supports.map((s) => ({
+    id: Number(s.id),
+    code: s.code,
+    name: s.name,
+    art: s.art, // "Healing Amulet.png"
+    kind: "support" as const,
+  })),
+  ...CD.events.map((e) => ({
+    id: Number(e.id),
+    code: e.code,
+    name: e.name,
+    art: e.art, // "Fireworks.png"
+    kind: "event" as const,
+  })),
+];
+
+// 5★ แบนเนอร์หลัก (featured) + 5★ หลุดเรต (ตัวอื่น ๆ)
+const FIVE_FEATURED = CHAR_POOL.filter((c) => c.code === "WINDBLADE_DUELIST");
+const FIVE_OFF = CHAR_POOL.filter((c) => c.code !== "WINDBLADE_DUELIST");
+
+// 4★ ใช้จาก OTHER_POOL ทั้งหมด
+const FOUR_POOL = OTHER_POOL;
+
+// 3★ ใช้จาก OTHER_POOL เช่นกัน (เดิมตั้งไว้เป็น 3★)
+const THREE_POOL = OTHER_POOL;
+
+/* ========================= rates & pity ========================= */
+const RATES = {
+  fiveBase: 0.006,        // 0.6%
+  fourBase: 0.051,        // 5.1%
+  fiveSoftFrom: 60,       // soft pity เริ่มที่ 60
+  fiveHardAt: 80,         // hard pity 80
+  fourGuaranteeSpan: 10,  // การันตี 4★ ทุก ๆ 10
 };
 
-type InvRow = Partial<Record<`char_${number}`, number>> &
-  Partial<Record<`card_${number}`, number>> & {
-    user_id: number;
-  };
+function rollRarity(pity5: number, pullsSince4: number): 3 | 4 | 5 {
+  // hard pity
+  if (pity5 + 1 >= RATES.fiveHardAt) return 5;
 
-type WishResultItem = {
-  rarity: 3 | 4 | 5;
-  id: number;
-  code: string;
-  name: string;
-  kind: "character" | "support" | "event";
-  artUrl: string;
-};
+  // soft pity ช่วง 60+
+  const base5 =
+    pity5 + 1 >= RATES.fiveSoftFrom
+      ? RATES.fiveBase + (pity5 + 1 - RATES.fiveSoftFrom + 1) * 0.06 // เร่งความน่าจะเป็นช่วงท้าย
+      : RATES.fiveBase;
 
-/* =========================== config ============================ */
-// เรตพื้นฐาน
-const rate = {
-  fiveBase: 0.006, // 0.6%
-  fourBase: 0.051, // 5.1%
-  softFrom: 60, // เริ่ม soft pity ที่ 60
-  hardAt: 80, // เข้า hard pity ที่ 80 (บังคับ 5★)
-  fourGuaranteeSpan: 10, // การันตี 4★ ทุก ๆ 10 ครั้ง
-};
+  // การันตี 4★ ทุก 10 ครั้ง
+  const must4 = (pullsSince4 + 1) >= RATES.fourGuaranteeSpan;
 
-// ความชัน soft pity (เพิ่มโอกาส 5★ ทีละนิดจนถึง hardAt)
-function fiveChanceWithPity(pity5: number): number {
-  if (pity5 + 1 >= rate.hardAt) return 1;
-  if (pity5 + 1 < rate.softFrom) return rate.fiveBase;
-  const steps = rate.hardAt - rate.softFrom; // 20
-  const progress = pity5 + 1 - rate.softFrom; // 0..steps-1
-  // เพิ่มความชันแบบนุ่ม ๆ ให้ขึ้นถึงใกล้ 100% ตอนแตะ hardAt
-  const extra = (0.9 / Math.max(1, steps)) * progress; // +0..0.9
-  return Math.min(1, rate.fiveBase + extra);
+  const r = Math.random();
+  if (r < base5) return 5;
+  if (must4 || r < base5 + RATES.fourBase) return 4;
+  return 3;
 }
 
-const NP_PER_DEAL = 1; // อัตราแลก Nexus Point -> Nexus Deal (ปรับได้)
-
-/* ========================= helpers ========================= */
-function rnd(): number {
-  return Math.random();
+function pick<T>(arr: T[]): T {
+  return arr[Math.floor(Math.random() * arr.length)];
 }
 
-function pickOne<T>(arr: readonly T[]): T {
-  return arr[Math.floor(rnd() * arr.length)];
-}
+/* ========================= DB helpers ========================= */
 
-function pick5Star(): PoolItem {
-  // 50/50 หน้าตู้ / หลุดเรต
-  if (rnd() < 0.5 && POOLS.FIVE_FEATURED.length) {
-    return pickOne(POOLS.FIVE_FEATURED);
-  }
-  return pickOne(POOLS.FIVE_OFF.length ? POOLS.FIVE_OFF : POOLS.FIVE_FEATURED);
-}
-
-function pick4Star(): PoolItem {
-  return pickOne(POOLS.FOUR_POOL);
-}
-
-function pick3Star(): PoolItem {
-  return pickOne(POOLS.THREE_POOL);
-}
-
-/* ====================== DB helpers (typed) ====================== */
-async function getUser(userId: number): Promise<UserRow | null> {
-  const q = await supa
+async function getWallet(userId: number): Promise<MeWallet> {
+  const sel = await supa
     .from("users")
-    .select("id,nexus_point,nexus_deal,wish_pity5")
+    .select("nexus_point,nexus_deal,wish_pity5,wish_guarantee5")
     .eq("id", userId)
-    .maybeSingle<UserRow>();
-  if (q.error) throw new Error(q.error.message);
-  return q.data ?? null;
+    .maybeSingle();
+
+  if (sel.error || !sel.data) throw new Error(sel.error?.message || "user not found");
+
+  return {
+    nexusPoint: Number(sel.data.nexus_point ?? 0),
+    nexusDeal: Number(sel.data.nexus_deal ?? 0),
+    pity5: Number(sel.data.wish_pity5 ?? 0),
+    guarantee5: Boolean(sel.data.wish_guarantee5 ?? false),
+  };
 }
 
-async function updateUser(userId: number, patch: Partial<UserRow>): Promise<void> {
-  const q = await supa.from("users").update(patch).eq("id", userId);
-  if (q.error) throw new Error(q.error.message);
+async function saveWallet(userId: number, w: Partial<MeWallet>) {
+  const upd = await supa
+    .from("users")
+    .update({
+      nexus_point: w.nexusPoint,
+      nexus_deal: w.nexusDeal,
+      wish_pity5: w.pity5,
+      wish_guarantee5: w.guarantee5,
+    })
+    .eq("id", userId);
+  if (upd.error) throw new Error(upd.error.message);
 }
 
-async function getInventory(userId: number): Promise<InvRow | null> {
-  const q = await supa.from("inventorys").select("*").eq("user_id", userId).maybeSingle<InvRow>();
-  if (q.error) throw new Error(q.error.message);
-  return q.data ?? null;
+async function addToInventory(userId: number, it: WishItem) {
+  // แปลงเป็น column ของ inventorys
+  if (it.kind === "character") {
+    const col = `char_${it.id}`;
+    await supa.rpc("increment_inventory_column", { p_user_id: userId, p_column: col, p_amount: 1 });
+  } else {
+    const col = `card_${it.id}`; // 1..3
+    await supa.rpc("increment_inventory_column", { p_user_id: userId, p_column: col, p_amount: 1 });
+  }
 }
 
-async function upsertInventory(userId: number, next: InvRow): Promise<void> {
-  const q = await supa.from("inventorys").upsert([{ ...next, user_id: userId }], { onConflict: "user_id" });
-  if (q.error) throw new Error(q.error.message);
-}
-
-/* ============================ GET ============================ */
-/** อ่านสถานะกระเป๋ากาชา (ไว้ให้หน้า UI โชว์ หรือจะไม่ใช้ก็ได้) */
+/* ============================ GET =========================== */
+// GET: กระเป๋า (สำหรับโชว์บนหน้า)
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
-    const userId = Number(url.searchParams.get("userId") ?? 0);
+    const userId = Number(url.searchParams.get("userId") ?? "0");
     if (!Number.isFinite(userId) || userId <= 0) {
       return NextResponse.json({ error: "bad userId" }, { status: 400 });
     }
-    const user = await getUser(userId);
-    if (!user) return NextResponse.json({ error: "user not found" }, { status: 404 });
-
-    return NextResponse.json({
-      ok: true,
-      user: {
-        id: user.id,
-        nexusPoint: Number(user.nexus_point ?? 0),
-        nexusDeal: Number(user.nexus_deal ?? 0),
-        pity5: Number(user.wish_pity5 ?? 0),
-      },
-    });
+    const w = await getWallet(userId);
+    return NextResponse.json({ ok: true, user: { nexusPoint: w.nexusPoint, nexusDeal: w.nexusDeal, pity5: w.pity5 } });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return NextResponse.json({ error: msg }, { status: 500 });
+    return NextResponse.json({ error: (e as Error).message }, { status: 400 });
   }
 }
 
-/* ============================ POST =========================== */
-/**
- * สุ่มกาชา + อัปเดต user & inventorys
- * body: { userId: number, times: 1|10, autoConvertNP?: boolean }
- */
+/* ============================ POST ========================== */
+// POST: สุ่มกาชา
 export async function POST(req: Request) {
-  let body: WishBody;
   try {
-    body = (await req.json()) as WishBody;
-  } catch {
-    return NextResponse.json({ error: "bad body" }, { status: 400 });
-  }
-
-  try {
-    const { userId, times, autoConvertNP = false } = body;
+    const body = (await req.json()) as PostBody;
+    const userId = Number(body?.userId ?? 0);
+    const times = body?.times === 10 ? 10 : 1;
+    const autoConvertNP = Boolean(body?.autoConvertNP);
     if (!userId || (times !== 1 && times !== 10)) {
       return NextResponse.json({ error: "bad params" }, { status: 400 });
     }
 
-    // โหลด user
-    const user = await getUser(userId);
-    if (!user) return NextResponse.json({ error: "user not found" }, { status: 404 });
+    // โหลดกระเป๋า
+    const w = await getWallet(userId);
 
-    let deals = Number(user.nexus_deal ?? 0);
-    let np = Number(user.nexus_point ?? 0);
-    let pity5 = Number(user.wish_pity5 ?? 0);
-
-    // แลก NP -> Deal ถ้าจำเป็น
-    if (deals < times && autoConvertNP && np > 0) {
-      const need = times - deals;
-      const can = Math.min(need, Math.floor(np / NP_PER_DEAL));
-      if (can > 0) {
-        np -= can * NP_PER_DEAL;
-        deals += can;
+    // แปลง Nexus Point → Nexus Deal อัตโนมัติถ้าจำเป็น
+    let needDeals = times;
+    if (w.nexusDeal < needDeals && autoConvertNP) {
+      const lack = needDeals - w.nexusDeal;
+      if (w.nexusPoint >= lack) {
+        w.nexusPoint -= lack;
+        w.nexusDeal += lack;
       }
     }
-
-    if (deals < times) {
-      return NextResponse.json({ error: "not enough deals" }, { status: 400 });
+    if (w.nexusDeal < needDeals) {
+      return NextResponse.json({ error: "not enough Nexus Deal" }, { status: 400 });
     }
-
-    // เตรียม inventory (อ่านของเดิมก่อน)
-    const inv = (await getInventory(userId)) ?? { user_id: userId };
-
-    // ฟังก์ชันปรับค่าใน inv
-    const addChar = (id: number, inc = 1) => {
-      const key = `char_${id}` as const;
-      const current = Number((inv as Record<string, unknown>)[key] ?? 0);
-      (inv as Record<string, unknown>)[key] = current + inc;
-    };
-    const addOther = (slotId: number, inc = 1) => {
-      const key = `card_${slotId}` as const; // supports/events ใช้ card_1..card_3
-      const current = Number((inv as Record<string, unknown>)[key] ?? 0);
-      (inv as Record<string, unknown>)[key] = current + inc;
-    };
 
     // เริ่มสุ่ม
-    const results: WishResultItem[] = [];
-    let pullsSince4 = 0; // นับเพื่อการันตี 4★ ทุก 10
+    const results: WishItem[] = [];
+    let pity5 = w.pity5;
+    let pullsSince4 = 0;
+    let guarantee5 = w.guarantee5;
 
     for (let i = 0; i < times; i++) {
-      // คำนวณเรตตาม pity
-      const p5 = fiveChanceWithPity(pity5);
-      const p4 = rate.fourBase;
+      const rarity = rollRarity(pity5, pullsSince4);
 
-      // การันตี 4★ ทุกๆ 10
-      const must4 = pullsSince4 >= rate.fourGuaranteeSpan - 1;
-
-      let got: PoolItem;
-      let rarity: 3 | 4 | 5;
-
-      if (pity5 + 1 >= rate.hardAt) {
-        got = pick5Star();
-        rarity = 5;
-      } else {
-        const r = rnd();
-        if (r < p5) {
-          got = pick5Star();
-          rarity = 5;
-        } else if (must4 || r < p5 + p4) {
-          got = pick4Star();
-          rarity = 4;
-        } else {
-          got = pick3Star();
-          rarity = 3;
-        }
-      }
-
-      // อัปเดตตัวนับ pity และ guarantee
       if (rarity === 5) {
+        // ตัดสิน featured/off ตาม 50/50 + ธง guarantee
+        let chosen: typeof CHAR_POOL[number];
+        if (guarantee5) {
+          chosen = pick(FIVE_FEATURED);
+          guarantee5 = false; // ใช้สิทธิ์แล้ว
+        } else {
+          const onBanner = Math.random() < 0.5;
+          chosen = onBanner ? pick(FIVE_FEATURED) : pick(FIVE_OFF);
+          if (!onBanner) guarantee5 = true; // หลุดเรต → รอบหน้า 5★ การันตีเข้าตู้
+        }
+
+        results.push({ ...chosen, rarity: 5 });
         pity5 = 0;
         pullsSince4 = 0;
-      } else {
+      } else if (rarity === 4) {
+        const chosen = pick(FOUR_POOL);
+        results.push({ ...chosen, rarity: 4 });
         pity5 += 1;
-        pullsSince4 = rarity === 4 ? 0 : pullsSince4 + 1;
+        pullsSince4 = 0;
+      } else {
+        const chosen = pick(THREE_POOL);
+        results.push({ ...chosen, rarity: 3 });
+        pity5 += 1;
+        pullsSince4 += 1;
       }
-
-      // บันทึกผล + อัปเดต inventory
-      results.push({
-        rarity,
-        id: got.id,
-        code: got.code,
-        name: got.name,
-        kind: got.kind,
-        artUrl: got.artUrl,
-      });
-
-      if (got.kind === "character") addChar(got.id, 1);
-      else addOther(got.id, 1); // id 1..3 = card_1..card_3
     }
 
-    // ตัด deals
-    deals -= times;
+    // ตัดยอดดีล
+    w.nexusDeal -= times;
 
-    // เซฟ user + inventory
-    await updateUser(userId, {
-      nexus_point: np,
-      nexus_deal: deals,
-      wish_pity5: pity5,
-    });
+    // เซฟกระเป๋า (รวม pity/guarantee)
+    await saveWallet(userId, { nexusDeal: w.nexusDeal, nexusPoint: w.nexusPoint, pity5, guarantee5 });
 
-    await upsertInventory(userId, inv);
+    // เพิ่มของเข้าคลัง
+    for (const it of results) {
+      await addToInventory(userId, it);
+    }
 
     return NextResponse.json({
       ok: true,
       items: results,
-      user: { nexusPoint: np, nexusDeal: deals, pity5 },
+      user: { nexusPoint: w.nexusPoint, nexusDeal: w.nexusDeal, pity5 },
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    return NextResponse.json({ error: msg }, { status: 500 });
+    return NextResponse.json({ error: msg }, { status: 400 });
   }
 }
