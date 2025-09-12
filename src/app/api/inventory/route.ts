@@ -15,10 +15,13 @@ type CardJson = {
   events: { id: number; code: string }[];
 };
 
+type KeyChar = `char_${1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12}`;
+type KeyCard = `card_${1 | 2 | 3}`;
+type InvKey = KeyChar | KeyCard;
+
 type InventoryRow = {
   user_id: number;
-  [k: string]: number | null | undefined; // char_1..12, card_1..3
-};
+} & Partial<Record<InvKey, number | null>>;
 
 type InventoryResponse = {
   ok: true;
@@ -30,38 +33,66 @@ type InventoryResponse = {
 };
 
 const OTHER_ID_BASE = 100; // 101/102/103 = card_1..3
+const CARD_LIMIT = 20;
+const EX_RATE = 3;
 
-/* ========================= Helpers for mapping code -> column ========================= */
+const CHAR_IDS: Readonly<number[]> = Array.from({ length: 12 }, (_, i) => i + 1);
+const CARD_IDX: Readonly<number[]> = [1, 2, 3];
+
+/* ========================= Helpers ========================= */
 const json = cardsData as CardJson;
 
 // characters: code -> char_id
 const codeToCharId = new Map<string, number>();
 for (const ch of json.characters) codeToCharId.set(ch.code, ch.char_id);
 
-// weผูก others ตามเดิม: supports[0] -> card_1, supports[1] -> card_2, events[0] -> card_3
+// we map others: supports[0] -> card_1, supports[1] -> card_2, events[0] -> card_3
 const s1 = json.supports[0]; // card_1
 const s2 = json.supports[1]; // card_2
-const e1 = json.events[0]; // card_3
+const e1 = json.events[0];   // card_3
 
 const codeToOtherIdx = new Map<string, 1 | 2 | 3>();
 if (s1) codeToOtherIdx.set(s1.code, 1);
 if (s2) codeToOtherIdx.set(s2.code, 2);
 if (e1) codeToOtherIdx.set(e1.code, 3);
 
-// จำกัด 20 เฉพาะ card_* เท่านั้น (char_* ไม่จำกัด) และส่วนเกินแปลง 3:1 เป็น Nexus Point
-const CARD_LIMIT = 20;
-const EX_RATE = 3;
+// build empty row object (for insert)
+function defaultInventory(userId: number): InventoryRow {
+  const seed: InventoryRow = { user_id: userId };
+  for (const id of CHAR_IDS) {
+    const key = `char_${id}` as KeyChar;
+    seed[key] = 0;
+  }
+  for (const i of CARD_IDX) {
+    const key = `card_${i}` as KeyCard;
+    seed[key] = 0;
+  }
+  return seed;
+}
 
-/* ========================= GET: อ่านคลัง ========================= */
+function getCol(row: Partial<Record<InvKey, number | null>>, col: InvKey): number {
+  return Number(row[col] ?? 0);
+}
+
+function setCol<T extends Partial<Record<InvKey, number | null>>>(
+  obj: T,
+  col: InvKey,
+  value: number
+): void {
+  (obj as Record<InvKey, number | null>)[col] = value;
+}
+
+/* ========================= GET ========================= */
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
     const userId = Number(url.searchParams.get("userId") ?? "0");
     if (!Number.isFinite(userId) || userId <= 0) {
-      return NextResponse.json({ ok: false, error: "bad userId" });
+      return NextResponse.json({ ok: false, error: "bad userId" }, { status: 400 });
     }
 
-    const { data, error } = await supa
+    // read or create inventory row
+    const sel = await supa
       .from("inventorys")
       .select(
         "user_id, char_1, char_2, char_3, char_4, char_5, char_6, char_7, char_8, char_9, char_10, char_11, char_12, card_1, card_2, card_3"
@@ -69,15 +100,26 @@ export async function GET(req: Request) {
       .eq("user_id", userId)
       .maybeSingle<InventoryRow>();
 
-    if (error) throw error;
+    if (sel.error) throw sel.error;
 
-    const row = (data ?? {}) as InventoryRow;
+    let row = sel.data ?? null;
+    if (!row) {
+      const ins = await supa
+        .from("inventorys")
+        .insert(defaultInventory(userId))
+        .select(
+          "user_id, char_1, char_2, char_3, char_4, char_5, char_6, char_7, char_8, char_9, char_10, char_11, char_12, card_1, card_2, card_3"
+        )
+        .maybeSingle<InventoryRow>();
+      if (ins.error) throw ins.error;
+      row = ins.data ?? defaultInventory(userId);
+    }
 
     const chars: Record<number, number> = {};
-    for (let i = 1; i <= 12; i++) chars[i] = Number(row[`char_${i}`] ?? 0);
+    for (const i of CHAR_IDS) chars[i] = Number(row[`char_${i}` as KeyChar] ?? 0);
 
     const others: Record<number, number> = {};
-    for (let s = 1; s <= 3; s++) others[s] = Number(row[`card_${s}`] ?? 0);
+    for (const i of CARD_IDX) others[i] = Number(row[`card_${i}` as KeyCard] ?? 0);
 
     const byCode: Record<string, number> = {};
     for (const ch of json.characters) byCode[ch.code] = chars[ch.char_id] ?? 0;
@@ -88,8 +130,7 @@ export async function GET(req: Request) {
     const itemsPositive: InventoryResponse["itemsPositive"] = [];
     for (const ch of json.characters) {
       const qty = chars[ch.char_id] ?? 0;
-      if (qty > 0)
-        itemsPositive.push({ cardId: ch.char_id, code: ch.code, kind: "character", qty });
+      if (qty > 0) itemsPositive.push({ cardId: ch.char_id, code: ch.code, kind: "character", qty });
     }
     if (s1 && (others[1] ?? 0) > 0)
       itemsPositive.push({ cardId: OTHER_ID_BASE + 1, code: s1.code, kind: "support", qty: others[1] });
@@ -102,26 +143,34 @@ export async function GET(req: Request) {
     return NextResponse.json(payload);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ ok: false, error: `inventory failed: ${msg}` });
+    return NextResponse.json({ ok: false, error: `inventory failed: ${msg}` }, { status: 400 });
   }
 }
 
-/* ========================= POST: แจกการ์ด + แปลงส่วนเกิน card_* เป็น Nexus Point =========================
+/* ========================= POST =========================
   Body:
   {
     "userId": 123,
     "grants": [
       { "code": "BLAZING_SIGIL", "qty": 5 },
       { "code": "HEALING_AMULET", "qty": 30 },
-      { "code": "BLAZE_KNIGHT", "qty": 1 }
+      { "code": "BLAZE_KNIGHT",  "qty": 1 }
     ]
   }
-*/
+   แจกการ์ด + แปลงส่วนเกิน card_* เป็น Nexus Point (ทุก ๆ 3 ใบ -> 1 NP)
+========================================================== */
 export async function POST(req: Request) {
   try {
-    const body = await req.json().catch(() => ({}));
+    const body = (await req.json().catch(() => ({}))) as {
+      userId?: number;
+      grants?: Array<{ code: string; qty: number }>;
+    };
+
     const userId = Number(body?.userId ?? 0);
-    const grants = (body?.grants ?? []) as Array<{ code: string; qty: number }>;
+    const grants = (body?.grants ?? []).map((g) => ({
+      code: String(g?.code ?? ""),
+      qty: Math.max(0, Math.floor(Number(g?.qty ?? 0))),
+    }));
 
     if (!Number.isFinite(userId) || userId <= 0) {
       return NextResponse.json({ error: "bad userId" }, { status: 400 });
@@ -130,84 +179,69 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "bad grants" }, { status: 400 });
     }
 
-    // ดึงแถวคลัง (หรือสร้างถ้ายังไม่มี)
-    let { data: inv, error } = await supa
-      .from("inventorys")
-      .select("*")
-      .eq("user_id", userId)
-      .maybeSingle<InventoryRow>();
-    if (error) throw error;
+    // read or create inventory row
+    const sel = await supa.from("inventorys").select("*").eq("user_id", userId).maybeSingle<InventoryRow>();
+    if (sel.error) throw sel.error;
 
-    if (!inv) {
-      const seed: InventoryRow = { user_id: userId };
-      for (let i = 1; i <= 12; i++) (seed as any)[`char_${i}`] = 0;
-      for (let i = 1; i <= 3; i++) (seed as any)[`card_${i}`] = 0;
-      const ins = await supa.from("inventorys").insert(seed).select("*").maybeSingle<InventoryRow>();
-      if (ins.error) throw ins.error;
-      inv = ins.data as InventoryRow;
+    let inv: InventoryRow;
+    if (!sel.data) {
+      const inserted = await supa.from("inventorys").insert(defaultInventory(userId)).select("*").maybeSingle<InventoryRow>();
+      if (inserted.error) throw inserted.error;
+      inv = inserted.data ?? defaultInventory(userId);
+    } else {
+      inv = sel.data;
     }
 
     let gainedNP = 0;
-    const updates: Partial<InventoryRow> = {};
+    const updates: Partial<Record<InvKey, number | null>> = {};
 
     for (const g of grants) {
-      const code = String(g?.code || "");
-      const add = Math.max(0, Math.floor(Number(g?.qty ?? 0)));
-      if (!code || !add) continue;
+      if (!g.code || g.qty <= 0) continue;
 
       // char_x
-      const charId = codeToCharId.get(code);
+      const charId = codeToCharId.get(g.code);
       if (charId) {
-        const col = `char_${charId}` as const;
-        const cur = Number(inv[col] ?? 0);
-        const next = cur + add; // ไม่มีลิมิต
-        (inv as any)[col] = next;
-        (updates as any)[col] = next;
+        const col = `char_${charId}` as KeyChar;
+        const next = getCol(inv, col) + g.qty; // no limit on characters
+        setCol(inv, col, next);
+        setCol(updates, col, next);
         continue;
       }
 
       // card_x (support/event)
-      const idx = codeToOtherIdx.get(code);
+      const idx = codeToOtherIdx.get(g.code);
       if (idx) {
-        const col = `card_${idx}` as const;
-        const cur = Number(inv[col] ?? 0);
-        let next = cur + add;
+        const col = `card_${idx}` as KeyCard;
+        let next = getCol(inv, col) + g.qty;
 
         if (next > CARD_LIMIT) {
-          const excess = next - CARD_LIMIT; // ส่วนที่เกิน 20
-          const convert = Math.floor(excess / EX_RATE); // 3:1
+          const excess = next - CARD_LIMIT;
+          const convert = Math.floor(excess / EX_RATE);
           const remainder = excess % EX_RATE;
           gainedNP += convert;
-          next = CARD_LIMIT + remainder; // เก็บเศษ 1–2 ไว้ (จะได้สะสมครบ 3 ค่อยแปลงรอบหน้า)
+          next = CARD_LIMIT + remainder; // keep remainder 0..2 for next time
         }
 
-        (inv as any)[col] = next;
-        (updates as any)[col] = next;
+        setCol(inv, col, next);
+        setCol(updates, col, next);
         continue;
       }
 
-      // code ไม่รู้จัก -> ข้าม
+      // unknown code -> skip
     }
 
-    // บันทึก inventory
+    // persist inventory updates
     if (Object.keys(updates).length > 0) {
       const up = await supa.from("inventorys").update(updates).eq("user_id", userId);
       if (up.error) throw up.error;
     }
 
-    // เพิ่ม Nexus Point ถ้ามี
+    // add nexus_point if converted
     if (gainedNP > 0) {
-      const userSel = await supa
-        .from("users")
-        .select("nexus_point")
-        .eq("id", userId)
-        .maybeSingle<{ nexus_point: number }>();
+      const userSel = await supa.from("users").select("nexus_point").eq("id", userId).maybeSingle<{ nexus_point: number }>();
       if (userSel.error) throw userSel.error;
-      const curNP = Number(userSel.data?.nexus_point ?? 0);
-      const upUser = await supa
-        .from("users")
-        .update({ nexus_point: curNP + gainedNP })
-        .eq("id", userId);
+      const current = Number(userSel.data?.nexus_point ?? 0);
+      const upUser = await supa.from("users").update({ nexus_point: current + gainedNP }).eq("id", userId);
       if (upUser.error) throw upUser.error;
     }
 
