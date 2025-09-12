@@ -12,8 +12,9 @@ type SaveBody = {
   /** ตัวละคร 1..12 (อ้างอิงจาก cards.json) สูงสุด 3 ใบ */
   characters: number[];
   /**
-   * การ์ดเสริม/อีเวนต์ 101..103 (แทน card_1..card_3) รวมได้ ≤ 20 ใบ
-   * เช่น { cardId: 101, count: 6 }
+   * การ์ดซัพพอร์ต/อีเวนต์ **1..3** (อ้างอิง card_1..card_3 ใน inventory)
+   * เช่น { cardId: 1, count: 6 }
+   * หมายเหตุ: เพื่อความเข้ากันได้ ถ้ารับมาเป็น 101..103 จะ map เป็น 1..3 ให้อัตโนมัติ
    */
   cards: { cardId: number; count: number }[];
 };
@@ -30,11 +31,12 @@ type DeckRow = {
 } & { [K in `card${number}`]?: number | null };
 
 /* ========================= helpers ========================= */
-const OTHER_ID_BASE = 100; // 101..103 = card_1..card_3
 
-function idToSlot(cardId: number): Slot | null {
-  const s = cardId - OTHER_ID_BASE;
-  return s === 1 || s === 2 || s === 3 ? (s as Slot) : null;
+// map id การ์ดให้เป็น slot 1..3 (รองรับทั้ง 1..3 และ 101..103)
+function idToSlot(id: number): Slot | null {
+  if (id === 1 || id === 2 || id === 3) return id as Slot;
+  if (id === 101 || id === 102 || id === 103) return (id - 100) as Slot;
+  return null;
 }
 
 function padToNumNull(arr: number[], len: number): (number | null)[] {
@@ -51,15 +53,15 @@ function toInt(v: unknown): number {
 
 /* ============================ GET =========================== */
 /**
- * คืนเด็คที่ active ของ user เพื่อนำไป preselect ในหน้า deck-builder
+ * คืนเด็ค active ของ user เพื่อ preselect หน้า deck-builder
  * query: ?userId=2
  * response:
  * {
  *   ok: true,
  *   deckId: number | null,
  *   name: string,
- *   characters: number[],                  // 1..12 (ยาว ≤ 3)
- *   cards: { cardId: number; count: number }[] // 101..103 เฉพาะที่ count > 0
+ *   characters: number[],                      // 1..12 (ยาว ≤ 3)
+ *   cards: { cardId: 1|2|3; count: number }[]  // เฉพาะที่ count > 0
  * }
  */
 export async function GET(req: Request) {
@@ -86,7 +88,7 @@ export async function GET(req: Request) {
       return NextResponse.json({ error: sel.error.message }, { status: 400 });
     }
 
-    // ถ้าไม่พบ active deck → ส่งโครง default (ว่าง)
+    // ถ้าไม่พบ active deck → ส่งโครงว่าง
     if (!sel.data) {
       return NextResponse.json({
         ok: true,
@@ -97,22 +99,23 @@ export async function GET(req: Request) {
       });
     }
 
-    // แปลงข้อมูลจาก DB แบบ type-safe
-    const row = sel.data; // DeckRow
+    const row = sel.data;
 
+    // characters
     const characters = [row.card_char1, row.card_char2, row.card_char3]
       .map((v) => toInt(v))
       .filter((n) => Number.isFinite(n) && n > 0) as number[];
 
-    // นับใบอื่น ๆ 101..103 จาก card1..card20
-    const counts: Record<number, number> = { 101: 0, 102: 0, 103: 0 };
+    // others: อ่านจาก card1..card20 ที่อาจเก็บเป็น 1..3 หรือ 101..103 → รวมเป็น count ต่อชนิด (1/2/3)
+    const counts: Record<Slot, number> = { 1: 0, 2: 0, 3: 0 };
     const anyRow = row as Record<string, unknown>;
     for (let i = 1; i <= 20; i++) {
       const v = toInt(anyRow[`card${i}`]);
-      if (v === 101 || v === 102 || v === 103) counts[v] = (counts[v] ?? 0) + 1;
+      const slot = idToSlot(v);
+      if (slot) counts[slot] = (counts[slot] ?? 0) + 1;
     }
-    const cards = Object.entries(counts)
-      .map(([id, count]) => ({ cardId: Number(id), count }))
+    const cards = (Object.keys(counts) as unknown as Slot[])
+      .map((k) => ({ cardId: k as number, count: counts[k] }))
       .filter((c) => c.count > 0);
 
     return NextResponse.json({
@@ -131,6 +134,8 @@ export async function GET(req: Request) {
 /* ============================ POST ========================== */
 /**
  * บันทึกเด็ค (สร้าง/อัปเดต active deck ของ user)
+ * - รับการ์ดซัพพอร์ต/อีเวนต์เป็น 1..3 (รองรับ 101..103 ด้วย จะ map เป็น 1..3 ให้)
+ * - เก็บลง decks.card1..card20 เป็นเลข 1..3 เสมอ
  */
 export async function POST(req: Request) {
   let body: SaveBody;
@@ -184,10 +189,10 @@ export async function POST(req: Request) {
     }
   }
 
-  // การ์ดเสริม/อีเวนต์: รวมไม่เกินสต็อกใน card_1..3
+  // การ์ดซัพพอร์ต/อีเวนต์: รวมไม่เกินสต็อกใน card_1..3
   const use: Record<Slot, number> = { 1: 0, 2: 0, 3: 0 };
   for (const it of body.cards) {
-    const slot = idToSlot(it.cardId);
+    const slot = idToSlot(Number(it.cardId));
     if (slot === null) {
       return NextResponse.json({ error: `invalid support/event id ${it.cardId}` }, { status: 400 });
     }
@@ -209,11 +214,14 @@ export async function POST(req: Request) {
   // เตรียมข้อมูลลง decks
   const chars3: (number | null)[] = padToNumNull(body.characters.slice(0, 3), 3);
 
-  const flatOthers: number[] = [];
+  // flatten การ์ดอื่น → เก็บ 1..3 เสมอ
+  const flatSlots: number[] = [];
   for (const it of body.cards) {
-    for (let i = 0; i < it.count; i++) flatOthers.push(it.cardId); // 101..103
+    const slot = idToSlot(Number(it.cardId));
+    if (!slot) continue;
+    for (let i = 0; i < it.count; i++) flatSlots.push(slot); // เก็บเป็น 1/2/3
   }
-  const others20: (number | null)[] = padToNumNull(flatOthers.slice(0, 20), 20);
+  const others20: (number | null)[] = padToNumNull(flatSlots.slice(0, 20), 20);
 
   // หา active deck ของ user
   const ex = await supa
