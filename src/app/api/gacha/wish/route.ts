@@ -9,7 +9,6 @@ export const dynamic = "force-dynamic";
    ★★★★★ (ตัวละคร) – pity 80 (hard), soft เริ่ม 60
    ★★★★ (support/event)
    5★ → 50/50 หน้าตู้ vs หลุดเรต (9 ตัว)
-   แก้อัตรา/รายการได้สะดวกที่บล็อกนี้
 ==================================================== */
 
 const BASE_5_RATE = 0.006;      // 0.6%
@@ -25,7 +24,7 @@ const POOL_5_FEATURED: PoolChar[] = [
 ];
 
 const POOL_5_OFF_RATE: PoolChar[] = [
-  // 9 ตัวหลุดเรต (แก้ id ให้ตรงเกมจริง)
+  // 9 ตัวหลุดเรต
   { kind: "char", id: 1, rate: 1 },
   { kind: "char", id: 2, rate: 1 },
   { kind: "char", id: 3, rate: 1 },
@@ -38,7 +37,6 @@ const POOL_5_OFF_RATE: PoolChar[] = [
 ];
 
 const POOL_4_SUPPORTS: PoolCard[] = [
-  // support/event 4★
   { kind: "card", id: 1, rate: 30 },
   { kind: "card", id: 2, rate: 30 },
   { kind: "card", id: 3, rate: 30 },
@@ -61,12 +59,12 @@ function pickWeighted<T extends { rate: number }>(arr: T[]): T {
   return arr[arr.length - 1];
 }
 
-/** ให้โอกาส 5★ ที่ pity = p (0-based, แปลว่าหลังไม่ออก 5★ มาแล้ว p ครั้ง) */
+/** ให้โอกาส 5★ ที่ pity = p (0-based: จำนวนครั้งที่ยังไม่ออก 5★ ติดต่อกัน) */
 function fiveRateAtPity(pity: number): number {
-  if (pity >= HARD_PITY - 1) return 1; // กลายเป็นการันตีใน roll ถัดไป
+  if (pity >= HARD_PITY - 1) return 1; // roll ถัดไปการันตี
   if (pity < SOFT_START) return BASE_5_RATE;
-  // soft ramp แบบ linear ให้ไปแตะ ~32% ที่ pity=79
-  const steps = (HARD_PITY - 1) - SOFT_START + 1; // 79-60+1 = 20
+  // soft ramp แบบ linear → ไปแตะ ~32% ที่ pity=79
+  const steps = (HARD_PITY - 1) - SOFT_START + 1; // 79..60 → 20 step
   const targetAt79 = 0.32;
   const stepInc = (targetAt79 - BASE_5_RATE) / steps;
   const idx = pity - SOFT_START + 1; // 1..20
@@ -84,13 +82,10 @@ function pickFourStar(): Result {
   return { kind: "card", id: chosen.id, rarity: 4 };
 }
 
-/** roll 1 ครั้งตาม pity (pity คือจำนวน "ครั้งที่ไม่ออก 5★ ติดต่อกัน") */
 function rollOneWithPity(pity: number): { result: Result; nextPity: number } {
   const prob5 = fiveRateAtPity(pity);
   const isFive = Math.random() < prob5;
-  if (isFive) {
-    return { result: pickFiveStar(), nextPity: 0 };
-  }
+  if (isFive) return { result: pickFiveStar(), nextPity: 0 };
   return { result: pickFourStar(), nextPity: pity + 1 };
 }
 
@@ -131,11 +126,12 @@ async function setUserWalletAndPity(userId: number, point: number, deal: number,
   if (upd.error) throw new Error(upd.error.message);
 }
 
+/** upsert inventory ด้วย user_id (ไม่ใช้ id แล้ว) */
 async function upsertInventory(userId: number, items: Result[]) {
   const inv = await supa
     .from("inventorys")
     .select(
-      "id,user_id,char_1,char_2,char_3,char_4,char_5,char_6,char_7,char_8,char_9,char_10,char_11,char_12,card_1,card_2,card_3"
+      "user_id,char_1,char_2,char_3,char_4,char_5,char_6,char_7,char_8,char_9,char_10,char_11,char_12,card_1,card_2,card_3"
     )
     .eq("user_id", userId)
     .maybeSingle();
@@ -152,17 +148,24 @@ async function upsertInventory(userId: number, items: Result[]) {
     if (it.kind === "card" && it.id >= 1 && it.id <= 3) add(`card_${it.id}`);
   }
 
-  // combine ค่าเดิม + เพิ่ม
   const payload: Record<string, number> = {};
   for (let i = 1; i <= 12; i++) payload[`char_${i}`] = next[`char_${i}`] ?? get(`char_${i}`);
   for (let i = 1; i <= 3; i++) payload[`card_${i}`] = next[`card_${i}`] ?? get(`card_${i}`);
 
   if (!inv.data) {
-    const ins = await supa.from("inventorys").insert([{ user_id: userId, ...payload }]).select("id").maybeSingle();
+    const ins = await supa
+      .from("inventorys")
+      .insert([{ user_id: userId, ...payload }])
+      .select("user_id")
+      .maybeSingle();
     if (ins.error) throw new Error(ins.error.message);
   } else {
-    const invId = (inv.data as { id: number }).id;
-    const upd = await supa.from("inventorys").update(payload).eq("id", invId).select("id").maybeSingle();
+    const upd = await supa
+      .from("inventorys")
+      .update(payload)
+      .eq("user_id", userId)
+      .select("user_id")
+      .maybeSingle();
     if (upd.error) throw new Error(upd.error.message);
   }
 }
@@ -176,13 +179,13 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "bad params" }, { status: 400 });
     }
 
-    // 1) โหลดกระเป๋า + pity (แยก const/let ให้ผ่าน prefer-const)
+    // โหลดกระเป๋า + pity
     const wallet = await getUserWalletAndPity(userId);
     let point = wallet.point;
     let deal  = wallet.deal;
     const pity5 = wallet.pity5;
 
-    // 2) ใช้ Nexus Deal / แลกอัตโนมัติถ้าต้องการ
+    // ใช้ดีล + แลกอัตโนมัติถ้าต้องการ
     const need = count - deal;
     if (need > 0 && autoExchangeIfNeed) {
       const EXCHANGE_RATE = 10; // 10 point → 1 deal
@@ -197,13 +200,13 @@ export async function POST(req: Request) {
     }
     deal -= count;
 
-    // 3) roll ด้วย pity
+    // roll ด้วย pity
     const { results, pityOut } = rollManyWithPity(count, pity5);
 
-    // 4) +inventory
+    // +inventory
     await upsertInventory(userId, results);
 
-    // 5) อัปเดตกระเป๋า + pity
+    // อัปเดตกระเป๋า + pity
     await setUserWalletAndPity(userId, point, deal, pityOut);
 
     return NextResponse.json({

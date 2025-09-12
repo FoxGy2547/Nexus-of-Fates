@@ -1,19 +1,12 @@
 // src/app/wish/page.tsx
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState, useCallback } from "react";
 import Image from "next/image";
-import { motion, AnimatePresence, Variants } from "framer-motion";
-import type { JSX } from "react";
 
-/* ==================== types ==================== */
 type MeResp =
   | { ok: boolean; user?: { id: number } }
   | { ok: false; error?: string };
-
-type WalletResp =
-  | { ok: boolean; nexusPoint: number; nexusDeal: number }
-  | { error: string };
 
 type WishResult =
   | { kind: "char"; id: number; rarity: 5 }
@@ -29,7 +22,6 @@ type WishResp =
     }
   | { error: string };
 
-/* ==================== helpers ==================== */
 async function getJSON<T>(url: string): Promise<T> {
   const r = await fetch(url, { cache: "no-store" });
   const txt = await r.text().catch(() => "");
@@ -48,56 +40,26 @@ async function postJSON<T>(url: string, body: unknown): Promise<T> {
   return (txt ? JSON.parse(txt) : ({} as unknown)) as T;
 }
 
-const backdropVariants: Variants = {
-  hidden: { opacity: 0 },
-  show: { opacity: 1, transition: { duration: 0.25 } },
-};
-
-const cardVariants: Variants = {
-  initial: { y: 40, opacity: 0, scale: 0.95 },
-  enter: (i: number) => ({
-    y: 0,
-    opacity: 1,
-    scale: 1,
-    transition: { delay: 0.08 * i, duration: 0.35 },
-  }),
-};
-
-/* ==================== page ==================== */
-export default function WishPage(): JSX.Element {
+export default function WishPage() {
   const [userId, setUserId] = useState<number | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [wallet, setWallet] = useState<{ nexusPoint: number; nexusDeal: number }>({
-    nexusPoint: 0,
-    nexusDeal: 0,
-  });
-  const [rolling, setRolling] = useState<boolean>(false);
+  const [rolling, setRolling] = useState(false);
   const [results, setResults] = useState<WishResult[] | null>(null);
-  const [pity5, setPity5] = useState<number>(0);
 
-  // โหลด user + wallet
+  // banner info (ใส่/แก้เองตามต้องการได้)
+  const featured = {
+    id: 4,
+    name: "Windblade Duelist",
+    art: "/char_cards/Windblade_Duelist.png",
+  };
+
   useEffect(() => {
     (async () => {
       try {
         const me = await getJSON<MeResp>("/api/me");
         const uid = me && "user" in me ? me.user?.id ?? 0 : 0;
-        if (!uid) {
-          setLoading(false);
-          return;
-        }
-        setUserId(uid);
-
-        // ถ้ามี endpoint /api/wallet (ตามที่เราเคยทำ) ดึงมาโชว์
-        try {
-          const w = await getJSON<WalletResp>(`/api/wallet?userId=${uid}`);
-          if ("ok" in w && w.ok) {
-            setWallet({ nexusDeal: w.nexusDeal, nexusPoint: w.nexusPoint });
-          }
-        } catch {
-          // เงียบไว้—อาจยังไม่สร้าง /api/wallet ก็ไม่เป็นไร
-        }
-      } finally {
-        setLoading(false);
+        if (uid) setUserId(uid);
+      } catch {
+        /* ignore */
       }
     })();
   }, []);
@@ -114,14 +76,11 @@ export default function WishPage(): JSX.Element {
         });
         if ("ok" in r && r.ok) {
           setResults(r.results);
-          setWallet(r.wallet);
-          setPity5(r.pity5);
         } else {
           alert(("error" in r && r.error) || "Wish failed");
         }
       } catch (e) {
-        const msg = e instanceof Error ? e.message : "Wish failed";
-        alert(msg);
+        alert(e instanceof Error ? e.message : "Wish failed");
       } finally {
         setRolling(false);
       }
@@ -131,100 +90,103 @@ export default function WishPage(): JSX.Element {
 
   const summary = useMemo(() => {
     if (!results) return "";
-    const star5 = results.filter((x) => x.rarity === 5).length;
-    const star4 = results.filter((x) => x.rarity === 4).length;
-    return `★5 x${star5} • ★4 x${star4}`;
+    const s5 = results.filter((x) => x.rarity === 5).length;
+    const s4 = results.filter((x) => x.rarity === 4).length;
+    return `★5 x${s5} • ★4 x${s4}`;
   }, [results]);
 
   return (
-    <main className="min-h-screen p-6 flex flex-col gap-6">
-      <header className="flex items-center gap-3">
-        <h1 className="text-2xl font-bold">Wish</h1>
-        <div className="ml-auto flex items-center gap-3 text-sm opacity-80">
-          <span>NP: {wallet.nexusPoint}</span>
-          <span>Deals: {wallet.nexusDeal}</span>
-          <span>Pity5: {pity5}</span>
-        </div>
-      </header>
+    <main className="min-h-screen relative overflow-hidden bg-gradient-to-b from-sky-900/60 via-indigo-900/60 to-black text-white">
+      {/* แบนเนอร์หลัก */}
+      <section className="max-w-6xl mx-auto pt-10 px-4">
+        <h1 className="text-3xl font-bold mb-4">Wish</h1>
 
-      {loading && <div className="opacity-70">Loading…</div>}
-
-      {!loading && !userId && (
-        <div className="opacity-70">กรุณาล็อกอินก่อนถึงจะกดสุ่มได้นะ</div>
-      )}
-
-      {!loading && userId && (
-        <>
-          <section className="rounded-xl border border-white/10 p-4 bg-black/20">
-            <div className="flex flex-wrap items-center gap-3">
-              <button
-                className="px-4 py-2 rounded bg-amber-600 hover:bg-amber-500 disabled:opacity-50"
-                disabled={rolling}
-                onClick={() => doWish(1)}
-              >
-                Wish x1
-              </button>
-              <button
-                className="px-4 py-2 rounded bg-amber-700 hover:bg-amber-600 disabled:opacity-50"
-                disabled={rolling}
-                onClick={() => doWish(10)}
-              >
-                Wish x10
-              </button>
-              <div className="ml-auto text-sm opacity-80">{summary}</div>
+        <div className="relative rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md overflow-hidden">
+          <div className="grid lg:grid-cols-[2fr_3fr]">
+            {/* บล็อกข้อความซ้าย */}
+            <div className="p-6 lg:p-8 flex flex-col gap-3">
+              <span className="inline-block px-3 py-1 rounded-full bg-indigo-600/80 text-sm font-semibold w-max">
+                Standard Wish
+              </span>
+              <h2 className="text-4xl font-extrabold tracking-tight">Wanderlust Invocation</h2>
+              <p className="text-white/80">
+                Standard wishes have no time limit. Every 10 wishes is guaranteed to include at least one 4★ or higher item.
+              </p>
+              <div className="mt-3 text-sm text-white/70">View Details for more.</div>
             </div>
-          </section>
 
-          <AnimatePresence>
-            {results && (
-              <motion.section
-                key="results"
-                initial="hidden"
-                animate="show"
-                exit="hidden"
-                variants={backdropVariants}
-                className="rounded-xl border border-white/10 p-4 bg-black/30"
-              >
-                <div className="font-semibold mb-3">ผลการสุ่ม</div>
-                <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-                  {results.map((r, i) => (
-                    <motion.div
-                      key={`${r.kind}-${"id" in r ? r.id : i}-${i}`}
-                      custom={i}
-                      initial="initial"
-                      animate="enter"
-                      variants={cardVariants}
-                      className={`rounded-lg p-3 border ${
-                        r.rarity === 5 ? "border-yellow-400" : "border-violet-400"
-                      } bg-black/40`}
-                    >
-                      <div className="text-xs opacity-70 mb-1">
-                        {r.rarity === 5 ? "★5 Character" : "★4 Support/Event"}
-                      </div>
-                      <div className="aspect-[2/3] relative rounded overflow-hidden bg-neutral-900">
-                        {/* แทนด้วยภาพจริงตาม id ของเธอภายหลังได้ */}
-                        <Image
-                          src={
-                            r.kind === "char"
-                              ? `/char_cards/${r.id}.png`
-                              : `/cards/${r.id}.png`
-                          }
-                          alt={`${r.kind}-${"id" in r ? r.id : ""}`}
-                          fill
-                          className="object-contain"
-                          unoptimized
-                        />
-                      </div>
-                      <div className="mt-2 text-sm">
-                        {r.kind.toUpperCase()} #{r.kind === "char" ? r.id : r.id}
-                      </div>
-                    </motion.div>
-                  ))}
+            {/* รูปตัวเด่นขวา */}
+            <div className="relative min-h-[320px] bg-gradient-to-tr from-indigo-800/40 to-sky-600/30">
+              <Image
+                src={featured.art}
+                alt={featured.name}
+                fill
+                priority
+                unoptimized
+                className="object-contain object-center scale-[0.95]"
+              />
+              <div className="absolute bottom-3 right-4 text-right">
+                <div className="inline-flex items-center gap-2 rounded-full bg-black/40 px-3 py-1 text-sm">
+                  <span className="text-amber-300">★ ★ ★ ★ ★</span>
+                  <span className="opacity-80">{featured.name}</span>
                 </div>
-              </motion.section>
-            )}
-          </AnimatePresence>
-        </>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* ปุ่ม Wish ล่างกึ่งกลาง */}
+        <div className="relative">
+          <div className="pointer-events-none h-8" />
+          <div className="absolute left-1/2 -translate-x-1/2 -bottom-16 w-full max-w-2xl">
+            <div className="flex items-center justify-center gap-6">
+              <button
+                onClick={() => doWish(1)}
+                disabled={!userId || rolling}
+                className="w-60 h-16 rounded-2xl bg-white/10 hover:bg-white/15 border border-white/20 shadow-lg backdrop-blur-md transition
+                           disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <div className="text-lg font-semibold">Wish ×1</div>
+                <div className="text-xs opacity-80">ใช้ Nexus Deal ×1</div>
+              </button>
+              <button
+                onClick={() => doWish(10)}
+                disabled={!userId || rolling}
+                className="w-60 h-16 rounded-2xl bg-emerald-600/90 hover:bg-emerald-500 border border-white/20 shadow-xl transition
+                           disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <div className="text-lg font-extrabold">Wish ×10</div>
+                <div className="text-xs opacity-90">ใช้ Nexus Deal ×10</div>
+              </button>
+            </div>
+          </div>
+          <div className="h-20" />
+        </div>
+      </section>
+
+      {/* แสดงผลการสุ่มแบบเรียบง่าย */}
+      {results && (
+        <section className="max-w-6xl mx-auto mt-24 px-4">
+          <div className="text-sm opacity-80 mb-2">{summary}</div>
+          <div className="grid sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+            {results.map((r, i) => (
+              <div
+                key={`${r.kind}-${r.id}-${i}`}
+                className={`p-3 rounded-xl border bg-black/30 ${
+                  r.rarity === 5 ? "border-amber-400/60" : "border-indigo-300/40"
+                }`}
+              >
+                <div className="aspect-[2/3] rounded-lg bg-white/5 mb-2 flex items-center justify-center text-2xl">
+                  {r.kind === "char" ? "CHAR " + r.id : "CARD " + r.id}
+                </div>
+                <div className="text-sm font-medium truncate">
+                  {r.kind === "char" ? `Character #${r.id}` : `Support/Event #${r.id}`}
+                </div>
+                <div className="text-xs opacity-80">{r.rarity === 5 ? "★★★★★" : "★★★★"}</div>
+              </div>
+            ))}
+          </div>
+        </section>
       )}
     </main>
   );
