@@ -1,3 +1,4 @@
+// src/app/wish/WishCinema.tsx
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -103,15 +104,25 @@ export default function WishCinema({ open, results, onDone }: Props) {
 
       {/* INTRO */}
       {phase === "intro" && (
-        <div className={`meteor ${ribbonClass}`}>
-          <div className="meteor__core" />
-          <div className="meteor__tail meteor__tail--1" />
-          <div className="meteor__tail meteor__tail--2" />
-          <div className="meteor__tail meteor__tail--3" />
-          <div className="meteor__spark meteor__spark--1" />
-          <div className="meteor__spark meteor__spark--2" />
-          <div className="meteor__spark meteor__spark--3" />
-        </div>
+        <>
+          <div className={`meteor ${ribbonClass}`}>
+            <div className="meteor__core" />
+            <div className="meteor__tail meteor__tail--1" />
+            <div className="meteor__tail meteor__tail--2" />
+            <div className="meteor__tail meteor__tail--3" />
+            <div className="meteor__spark meteor__spark--1" />
+            <div className="meteor__spark meteor__spark--2" />
+            <div className="meteor__spark meteor__spark--3" />
+          </div>
+
+          {/* ข้อความรอกลางจอ (เฉพาะตอนยังไม่มีผล) */}
+          {!hasData && (
+            <div className="wait-center" aria-live="polite">
+              <div className="spinner" />
+              <div className="wait-text">รอแปปนึงเน้อ</div>
+            </div>
+          )}
+        </>
       )}
 
       {/* FLIP */}
@@ -175,6 +186,11 @@ export default function WishCinema({ open, results, onDone }: Props) {
         .wish-topbar{position:absolute;top:14px;right:14px;z-index:70}
         .btn-skip{padding:8px 12px;border-radius:10px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.2);color:#fff;font-weight:600}
 
+        /* wait text */
+        .wait-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;z-index:68;pointer-events:none}
+        .spinner{width:22px;height:22px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:999px;animation:spin .9s linear infinite}
+        .wait-text{color:#fff;font-weight:600;text-shadow:0 2px 6px rgba(0,0,0,.5)}
+
         /* meteor */
         .meteor{position:absolute;inset:0;overflow:hidden}
         .meteor__core{position:absolute;left:-20%;top:-20%;width:24px;height:24px;border-radius:999px;background:#fff;filter:blur(1px);animation:meteorMove ${INTRO_MS}ms ease-in forwards}
@@ -221,6 +237,7 @@ export default function WishCinema({ open, results, onDone }: Props) {
       `}</style>
 
       <style jsx global>{`
+        @keyframes spin{to{transform:rotate(360deg)}}
         @keyframes meteorMove{from{transform:translate3d(-20%,-20%,0) rotate(22deg);opacity:0}35%{opacity:1}to{transform:translate3d(120%,120%,0) rotate(22deg);opacity:0}}
         @keyframes meteorSpark{from{transform:translate3d(-22%,-22%,0) rotate(22deg);opacity:0}30%{opacity:1}to{transform:translate3d(110%,110%,0) rotate(22deg);opacity:0}}
         @keyframes shinePulse{0%{opacity:0}30%{opacity:1}100%{opacity:.88}}
