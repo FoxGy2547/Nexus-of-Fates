@@ -52,12 +52,9 @@ type SaveBody = {
   cards: { cardId: number; count: number }[];
 };
 
-/* -------- deck response types (หลีกเลี่ยง any) -------- */
 type DeckData = {
   name?: string;
-  characters?: number[];
-  cards?: { cardId: number; count: number }[];
-  [key: string]: unknown; // รองรับทรง column อย่าง card1..card20, char1..char3, card_char1..3
+  [key: string]: unknown; // ใช้เฉพาะ char_1..3, card_1..20 ตามที่กำหนด
 };
 type DeckResp =
   | { ok: true; deck: DeckData }
@@ -94,14 +91,14 @@ async function postJSON<T>(url: string, body: unknown): Promise<T> {
 const toUiOtherId = (dbId: number) => (dbId >= 101 ? dbId - 100 : dbId);
 const toDbOtherId = (uiId: number) => (uiId >= 101 ? uiId : uiId + 100);
 
-/** inventory → {chars, others} */
+/** inventory → {chars, others} (เดิม ๆ) */
 function normalizeInventory(raw: unknown): Inventory {
   const empty: Inventory = { userId: 0, chars: {}, others: {} };
   if (!raw || typeof raw !== "object") return empty;
 
   const top = raw as Record<string, unknown>;
 
-  // B) items[]
+  // items[]
   if (Array.isArray((top as Record<string, unknown>).items)) {
     const inv: Inventory = { userId: Number((top as Record<string, unknown>).userId ?? 0) || 0, chars: {}, others: {} };
     for (const it of (top as { items: Array<Record<string, unknown>> }).items) {
@@ -115,7 +112,7 @@ function normalizeInventory(raw: unknown): Inventory {
     return inv;
   }
 
-  // A) row เดี่ยว
+  // แถวเดี่ยว
   const row: Record<string, unknown> =
     typeof (top as Record<string, unknown>).row === "object" && (top as Record<string, unknown>).row
       ? ((top as Record<string, unknown>).row as Record<string, unknown>)
@@ -127,19 +124,12 @@ function normalizeInventory(raw: unknown): Inventory {
     others: {},
   };
 
-  if (typeof row.chars === "object" && row.chars && !Array.isArray(row.chars)) {
-    for (const [k, v] of Object.entries(row.chars as Record<string, unknown>)) inv.chars[Number(k)] = Number(v ?? 0);
-  }
-  if (typeof row.others === "object" && row.others && !Array.isArray(row.others)) {
-    for (const [k, v] of Object.entries(row.others as Record<string, unknown>)) inv.others[Number(k)] = Number(v ?? 0);
-  }
-
-  // map char_*/card_* → inv
+  // map char_* / card_* → inv (เฉพาะคีย์ตามสเปค)
   for (const [k, v] of Object.entries(row)) {
     if (typeof v === "number" || typeof v === "string") {
-      const mChar = /^(char|card_char)_(\d+)$/.exec(k);
+      const mChar = /^char_(\d+)$/.exec(k);
       if (mChar) {
-        inv.chars[Number(mChar[2])] = Number(v);
+        inv.chars[Number(mChar[1])] = Number(v);
         continue;
       }
       const mCard = /^card_(\d+)$/.exec(k);
@@ -188,7 +178,7 @@ function PageInner() {
   // ค่า “ที่เลือกไว้”
   const [selChars, setSelChars] = useState<number[]>([]);
   const [selOthers, setSelOthers] = useState<Record<number, number>>({});
-  const [loaded, setLoaded] = useState<boolean>(false); // กันเฟรมว่าง
+  const [loaded, setLoaded] = useState<boolean>(false);
 
   const othersTotal = useMemo(() => Object.values(selOthers).reduce((a, b) => a + b, 0), [selOthers]);
 
@@ -231,38 +221,24 @@ function PageInner() {
 
         const deck = deckResp.deck;
         if (deck) {
-          setName(deck.name || "My Deck");
+          setName((deck.name as string) || "My Deck");
 
-          // ===== Characters =====
-          const charIds: number[] = Array.isArray(deck.characters) ? deck.characters : [];
-          if (charIds.length === 0) {
-            // รองรับทั้ง char1..3 และ card_char1..3
-            for (const key of ["char1", "char2", "char3", "card_char1", "card_char2", "card_char3"]) {
-              const v = Number((deck as Record<string, unknown>)[key] ?? 0);
-              if (v) charIds.push(v);
-            }
+          // ===== Characters: char_1..char_3 =====
+          const charIds: number[] = [];
+          for (let i = 1; i <= 3; i++) {
+            const v = Number((deck as Record<string, unknown>)[`char_${i}`] ?? 0);
+            if (v) charIds.push(v);
           }
           setSelChars(charIds);
 
-          // ===== Others (supports/events) =====
+          // ===== Others: card_1..card_20 (ค่า 1/2/3 → นับรวมต่อชนิด) =====
           const picked: Record<number, number> = {};
-          if (Array.isArray(deck.cards)) {
-            for (const it of deck.cards as Array<{ cardId: number; count: number }>) {
-              const uiId = toUiOtherId(Number(it.cardId));
-              if (!uiId) continue;
-              picked[uiId] = (picked[uiId] ?? 0) + Number(it.count ?? 0);
-            }
-          } else {
-            // card1..card20 เก็บ "ชนิดการ์ด" 1/2/3 ต่อช่อง → สะสมตามค่า
-            for (let i = 1; i <= 20; i++) {
-              const key = `card${i}`;
-              const v = Number((deck as Record<string, unknown>)[key] ?? 0);
-              if (v > 0) picked[v] = (picked[v] ?? 0) + 1;
-            }
+          for (let i = 1; i <= 20; i++) {
+            const v = Number((deck as Record<string, unknown>)[`card_${i}`] ?? 0);
+            if (v > 0) picked[v] = (picked[v] ?? 0) + 1;
           }
           setSelOthers(picked);
         } else {
-          // ไม่มีเด็ค -> ว่าง
           setSelChars([]);
           setSelOthers({});
         }
@@ -326,7 +302,7 @@ function PageInner() {
     return OTHER_CARDS.filter((o) => (inv.others?.[o.id] ?? 0) > 0);
   }, [inv]);
 
-  // กันเฟรมแรกที่ยังไม่มีข้อมูล เพื่อให้ขึ้นกรอบ/ตัวเลขตั้งแต่เฟรมแรก
+  // กันเฟรมแรกที่ยังไม่มีข้อมูล
   if (!loaded) {
     return (
       <main className="min-h-screen p-6">
@@ -351,7 +327,7 @@ function PageInner() {
         </button>
       </header>
 
-      {/* Characters (เฉพาะที่มี) */}
+      {/* Characters */}
       <section>
         <div className="font-semibold mb-2">Characters</div>
 
@@ -387,7 +363,7 @@ function PageInner() {
         </div>
       </section>
 
-      {/* Supports & Events (เฉพาะที่มี) */}
+      {/* Supports & Events */}
       <section>
         <div className="font-semibold mb-2">Supports & Events</div>
 
