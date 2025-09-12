@@ -79,7 +79,9 @@ async function postJSON<T>(url: string, body: unknown): Promise<T> {
   return (txt ? JSON.parse(txt) : ({} as T)) as T;
 }
 
-/** -------- INVENTORY -------- */
+/** -------- INVENTORY --------
+ * รองรับ items[] และคีย์กระจาย char_#/card_#
+ */
 function normalizeInventory(raw: unknown): Inventory {
   const empty: Inventory = { userId: 0, chars: {}, others: {} };
   if (!raw || typeof raw !== "object") return empty;
@@ -94,7 +96,7 @@ function normalizeInventory(raw: unknown): Inventory {
       const kind = String(it.kind ?? "");
       if (!Number.isFinite(id) || qty <= 0) continue;
       if (kind === "character") inv.chars[id] = qty;
-      else inv.others[id >= 101 ? id - 100 : id] = qty;
+      else inv.others[id >= 101 ? id - 100 : id] = qty; // กันกรณี 101..103
     }
     return inv;
   }
@@ -143,7 +145,9 @@ function normalizeInventory(raw: unknown): Inventory {
   return inv;
 }
 
-/** -------- DECK -------- */
+/** -------- DECK --------
+ * ดึงค่าจากทุกรูปแบบ → { name, characters(รวม 0), others(1..3→count) }
+ */
 function normalizeDeck(raw: unknown): { name: string; characters: number[]; others: Record<number, number> } {
   let deckObj: Record<string, unknown> | null = null;
 
@@ -162,18 +166,24 @@ function normalizeDeck(raw: unknown): { name: string; characters: number[]; othe
 
   const name = String(deckObj?.name ?? "My Deck");
 
+  // characters (ยอมรับ 0 ด้วย)
   let characters: number[] = [];
   if (Array.isArray(deckObj?.characters)) {
-    characters = (deckObj!.characters as unknown[]).map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0);
+    characters = (deckObj!.characters as unknown[])
+      .map((x) => Number(x))
+      .filter((n) => Number.isFinite(n) && n >= 0);
   } else {
     const tmp: number[] = [];
     for (let i = 1; i <= 3; i++) {
-      const v = Number(deckObj?.[`card_char${i}`] ?? 0);
-      if (v) tmp.push(v);
+      const rawVal = (deckObj as Record<string, unknown> | null)?.[`card_char${i}`];
+      const hasValue = rawVal !== null && rawVal !== undefined && rawVal !== "";
+      const v = Number(rawVal);
+      if (hasValue && Number.isFinite(v) && v >= 0) tmp.push(v);
     }
     characters = tmp;
   }
 
+  // others (1/2/3)
   const others: Record<number, number> = {};
   if (Array.isArray(deckObj?.cards)) {
     for (const it of deckObj!.cards as Array<Record<string, unknown>>) {
@@ -291,9 +301,7 @@ function PageInner() {
   }
 
   function addOther(id: number) {
-    // กันระดับ UI
-    if (othersTotal >= 20) return;
-    // กันซ้ำระดับ state (กรณีคลิกรัว ๆ)
+    if (othersTotal >= 20) return; // กันระดับ UI
     setSelOthers((prev) => {
       const totalPrev = Object.values(prev).reduce((a, b) => a + b, 0);
       if (totalPrev >= 20) return prev;
@@ -321,7 +329,7 @@ function PageInner() {
       name,
       characters: selChars,
       cards: Object.entries(selOthers).map(([id, count]) => ({
-        cardId: Number(id),
+        cardId: Number(id), // 1..3
         count: Number(count),
       })),
     };
@@ -333,11 +341,18 @@ function PageInner() {
     }
   }
 
-  // ========== FILTER: แสดงเฉพาะใบที่ "มี" ==========
+  // ========== FILTER: แสดงเฉพาะใบที่ "มี" + "ที่พรีฟิล" ==========
   const VISIBLE_CHAR_CARDS = useMemo(() => {
-    if (!inv) return [] as typeof CHAR_CARDS;
-    return CHAR_CARDS.filter((c) => (inv.chars?.[c.id] ?? 0) > 0);
-  }, [inv]);
+    // รวม "ที่มีในคลัง" + "ที่ถูกเลือกไว้" (รองรับ id = 0)
+    const show = new Set<number>();
+    if (inv?.chars) {
+      for (const [k, qty] of Object.entries(inv.chars)) {
+        if ((qty ?? 0) > 0) show.add(Number(k));
+      }
+    }
+    for (const id of selChars) show.add(id);
+    return CHAR_CARDS.filter((c) => show.has(c.id));
+  }, [inv, selChars]);
 
   const VISIBLE_OTHER_CARDS = useMemo(() => {
     if (!inv) return [] as typeof OTHER_CARDS;
@@ -443,9 +458,7 @@ function PageInner() {
                 )}
 
                 <button
-                  className={`block w-full text-left relative z-0 ${
-                    disableAdd ? "cursor-not-allowed opacity-50" : ""
-                  }`}
+                  className={`block w-full text-left relative z-0 ${disableAdd ? "cursor-not-allowed opacity-50" : ""}`}
                   onClick={disableAdd ? undefined : () => addOther(o.id)}
                   title={disableAdd ? "เด็ค Others เต็ม 20 ใบแล้ว" : "กดการ์ดเพื่อเพิ่ม 1 ใบ"}
                   aria-disabled={disableAdd}

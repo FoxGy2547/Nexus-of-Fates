@@ -9,12 +9,11 @@ export const dynamic = "force-dynamic";
 type SaveBody = {
   userId: number;
   name: string;
-  /** ตัวละคร 1..12 (อ้างอิงจาก cards.json) สูงสุด 3 ใบ */
+  /** ตัวละคร 0..12 (รองรับ 0 = GOD), สูงสุด 3 ใบ */
   characters: number[];
   /**
-   * การ์ดซัพพอร์ต/อีเวนต์ **1..3** (อ้างอิง card_1..card_3 ใน inventory)
-   * เช่น { cardId: 1, count: 6 }
-   * หมายเหตุ: เพื่อความเข้ากันได้ ถ้ารับมาเป็น 101..103 จะ map เป็น 1..3 ให้อัตโนมัติ
+   * การ์ดซัพพอร์ต/อีเวนต์ 1..3 (ตรงกับ inventory card_1..card_3)
+   * หมายเหตุ: ถ้า client ส่งเป็น 101..103 จะ map เป็น 1..3 ให้
    */
   cards: { cardId: number; count: number }[];
 };
@@ -54,13 +53,12 @@ function toInt(v: unknown): number {
 /* ============================ GET =========================== */
 /**
  * คืนเด็ค active ของ user เพื่อ preselect หน้า deck-builder
- * query: ?userId=2
  * response:
  * {
  *   ok: true,
  *   deckId: number | null,
  *   name: string,
- *   characters: number[],                      // 1..12 (ยาว ≤ 3)
+ *   characters: number[],                      // 0..12 (ยาว ≤ 3)
  *   cards: { cardId: 1|2|3; count: number }[]  // เฉพาะที่ count > 0
  * }
  */
@@ -72,7 +70,6 @@ export async function GET(req: Request) {
       return NextResponse.json({ error: "bad userId" }, { status: 400 });
     }
 
-    // เตรียมรายชื่อคอลัมน์ card1..card20
     const otherCols = Array.from({ length: 20 }, (_, i) => `card${i + 1}`).join(",");
     const columns = `id,name,card_char1,card_char2,card_char3,${otherCols}`;
 
@@ -88,7 +85,6 @@ export async function GET(req: Request) {
       return NextResponse.json({ error: sel.error.message }, { status: 400 });
     }
 
-    // ถ้าไม่พบ active deck → ส่งโครงว่าง
     if (!sel.data) {
       return NextResponse.json({
         ok: true,
@@ -101,12 +97,12 @@ export async function GET(req: Request) {
 
     const row = sel.data;
 
-    // characters
+    // characters (>= 0 เพื่อรองรับ GOD = 0)
     const characters = [row.card_char1, row.card_char2, row.card_char3]
       .map((v) => toInt(v))
-      .filter((n) => Number.isFinite(n) && n > 0) as number[];
+      .filter((n) => Number.isFinite(n) && n >= 0);
 
-    // others: อ่านจาก card1..card20 ที่อาจเก็บเป็น 1..3 หรือ 101..103 → รวมเป็น count ต่อชนิด (1/2/3)
+    // others: สรุปเป็น count ต่อชนิด (1/2/3)
     const counts: Record<Slot, number> = { 1: 0, 2: 0, 3: 0 };
     const anyRow = row as Record<string, unknown>;
     for (let i = 1; i <= 20; i++) {
@@ -134,8 +130,9 @@ export async function GET(req: Request) {
 /* ============================ POST ========================== */
 /**
  * บันทึกเด็ค (สร้าง/อัปเดต active deck ของ user)
- * - รับการ์ดซัพพอร์ต/อีเวนต์เป็น 1..3 (รองรับ 101..103 ด้วย จะ map เป็น 1..3 ให้)
+ * - รับการ์ด others 1..3 (รองรับ 101..103 → map เป็น 1..3)
  * - เก็บลง decks.card1..card20 เป็นเลข 1..3 เสมอ
+ * - ตัวละครรองรับ 0..12 (0 = GOD ไม่ต้องมีใน inventory)
  */
 export async function POST(req: Request) {
   let body: SaveBody;
@@ -174,14 +171,18 @@ export async function POST(req: Request) {
 
   const stock = inv.data as Record<string, unknown>;
 
-  // ตัวละคร: ห้ามซ้ำ + ต้องมีของ ≥1
+  // ตัวละคร: ห้ามซ้ำ + ต้องอยู่ในช่วง 0..12
   const uniq = new Set(body.characters);
   if (uniq.size !== body.characters.length) {
     return NextResponse.json({ error: "duplicate characters" }, { status: 400 });
   }
   for (const cid of body.characters) {
-    if (cid < 1 || cid > 12) {
+    if (cid < 0 || cid > 12) {
       return NextResponse.json({ error: `invalid character id ${cid}` }, { status: 400 });
+    }
+    if (cid === 0) {
+      // GOD พิเศษ ไม่ต้องมีในคลัง
+      continue;
     }
     const qty = toInt(stock[`char_${cid}`]);
     if (qty < 1) {
@@ -219,7 +220,7 @@ export async function POST(req: Request) {
   for (const it of body.cards) {
     const slot = idToSlot(Number(it.cardId));
     if (!slot) continue;
-    for (let i = 0; i < it.count; i++) flatSlots.push(slot); // เก็บเป็น 1/2/3
+    for (let i = 0; i < it.count; i++) flatSlots.push(slot);
   }
   const others20: (number | null)[] = padToNumNull(flatSlots.slice(0, 20), 20);
 
