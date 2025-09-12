@@ -1,6 +1,6 @@
 {
   "characters": [
-    { "char_id": 0,  "code": "BLAZE_KNIGHT",      "name": "Blaze Knight",      "element": "Pyro",      "attack": 20, "hp": 20, "cost": 3, "abilityCode": "god",       "art": "god.png" },
+    { "char_id": 0,  "code": "GOD",      "name": "GOD",      "element": "Infinite",      "attack": 20, "hp": 20, "cost": 3, "abilityCode": "god",       "art": "god.png" },
     { "char_id": 1,  "code": "BLAZE_KNIGHT",      "name": "Blaze Knight",      "element": "Pyro",      "attack": 5, "hp": 20, "cost": 3, "abilityCode": "burn1",       "art": "Blaze Knight.png" },
     { "char_id": 2,  "code": "FROST_ARCHER",      "name": "Frost Archer",      "element": "Cryo",      "attack": 3, "hp": 20, "cost": 2, "abilityCode": "freeze1",     "art": "Frost Archer.png" },
     { "char_id": 3,  "code": "THUNDER_COLOSSUS",  "name": "Thunder Colossus",  "element": "Electro",   "attack": 6, "hp": 20, "cost": 4, "abilityCode": "chain",       "art": "Thunder Colossus.png" },
