@@ -8,7 +8,7 @@ export type WishItem = {
   id: number;
   code: string;
   name?: string | null;
-  /** ไฟล์รูปจาก cards.json เช่น "Healing Amulet.png" */
+  /** ไฟล์รูปจาก cards.json เช่น "Healing Amulet.png" (อาจขาดได้) */
   art?: string;
   /** เผื่อ API เก่า ส่งพาธเต็มมาแล้ว */
   artUrl?: string;
@@ -25,14 +25,22 @@ type Props = {
 };
 
 /* ============================== helpers ============================== */
+/** เลือก src ของภาพ: art+kind → artUrl → เดาจาก name → รูปว่าง */
 function imgSrc(it: WishItem): string {
-  // รองรับทั้งรูปแบบใหม่ (art+kind) และรูปแบบเก่า (artUrl)
+  // 1) ใช้ art + kind ถ้ามี
   if (it.art && it.art.trim()) {
     const base = it.kind === "character" ? "/char_cards/" : "/cards/";
     return encodeURI(base + it.art);
   }
+  // 2) ใช้ artUrl ถ้ามี
   if (it.artUrl && it.artUrl.trim()) return encodeURI(it.artUrl);
-  return "/cards/blank.png"; // กันพัง (ทำไฟล์เปล่าไว้ได้ หรือปล่อย 404 ได้เช่นกัน)
+  // 3) เดาจาก name ตามโฟลเดอร์จริง
+  if (it.name && it.name.trim()) {
+    const base = it.kind === "character" ? "/char_cards/" : "/cards/";
+    return encodeURI(`${base}${it.name.trim()}.png`);
+  }
+  // 4) กันพัง
+  return "/cards/blank.png";
 }
 
 function highestRarity(items: WishItem[]): 3 | 4 | 5 {
@@ -80,6 +88,7 @@ export default function WishCinema({ open, results, onDone }: Props) {
 
   return (
     <div className="wish-overlay">
+      {/* top-right buttons */}
       <div className="wish-topbar">
         {phase !== "summary" ? (
           <button className="btn-skip" onClick={() => { setRevealIndex(results.length); setPhase("summary"); }}>
@@ -90,6 +99,7 @@ export default function WishCinema({ open, results, onDone }: Props) {
         )}
       </div>
 
+      {/* intro ribbon */}
       {phase === "intro" && (
         <div className={`meteor ${ribbonClass}`}>
           <div className="meteor__core" />
@@ -102,6 +112,7 @@ export default function WishCinema({ open, results, onDone }: Props) {
         </div>
       )}
 
+      {/* flip grid */}
       {(phase === "flip" || phase === "summary") && (
         <div className={`flip-grid ${results.length === 10 ? "columns-ten" : "columns-one"}`}>
           {results.map((it, idx) => {
@@ -115,6 +126,7 @@ export default function WishCinema({ open, results, onDone }: Props) {
                   if (phase !== "flip") return;
                   if (idx === revealIndex) setRevealIndex(idx + 1);
                 }}
+                aria-label={revealed ? (it.name || it.code) : "Reveal card"}
               >
                 <div className="flip-face flip-back">
                   <div className="back-inner"><div className="back-glow" /><div className="back-star" /></div>
@@ -141,7 +153,7 @@ export default function WishCinema({ open, results, onDone }: Props) {
         <button className="to-continue" onClick={onDone}>Click anywhere to continue</button>
       )}
 
-      {/* (styles เหมือนเดิม) */}
+      {/* styles (เหมือนเดิม) */}
       <style jsx>{`
         .wish-overlay{position:fixed;inset:0;z-index:60;background:radial-gradient(1200px 600px at 50% 30%,rgba(35,52,90,.8),rgba(6,10,18,.96) 55%);display:flex;align-items:center;justify-content:center;overflow:hidden;user-select:none}
         .wish-topbar{position:absolute;top:14px;right:14px;z-index:70}

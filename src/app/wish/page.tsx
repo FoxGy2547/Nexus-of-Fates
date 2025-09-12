@@ -24,13 +24,17 @@ async function postJSON<T>(url: string, body: unknown): Promise<T> {
   return (txt ? JSON.parse(txt) : ({} as T)) as T;
 }
 
-/** เลือก src ของรูป — รองรับทั้งรูปแบบใหม่ (art+kind) และรูปแบบเก่า (artUrl) */
-function imgSrc(it: Pick<WishItem, "art" | "artUrl" | "kind">): string {
+/** ฟังก์ชันเดียวกับใน WishCinema เพื่อให้หน้าผลลัพธ์โหลดรูปได้ครบ */
+function imgSrc(it: Pick<WishItem, "art" | "artUrl" | "kind" | "name">): string {
   if (it.art && it.art.trim()) {
     const base = it.kind === "character" ? "/char_cards/" : "/cards/";
     return encodeURI(base + it.art);
   }
   if (it.artUrl && it.artUrl.trim()) return encodeURI(it.artUrl);
+  if (it.name && it.name.trim()) {
+    const base = it.kind === "character" ? "/char_cards/" : "/cards/";
+    return encodeURI(`${base}${it.name.trim()}.png`);
+  }
   return "/cards/blank.png";
 }
 
@@ -93,7 +97,7 @@ export default function WishPage(): JSX.Element {
   return (
     <main className="min-h-screen p-6">
       <section className="max-w-5xl mx-auto rounded-2xl p-5 bg-gradient-to-b from-[#0b1220] to-[#0b0f1a] border border-white/10">
-        {/* header */}
+        {/* Header */}
         <div className="flex items-center gap-2 mb-3">
           <span className="inline-flex items-center gap-2 rounded-full bg-emerald-700/20 px-3 py-1 text-emerald-300 text-xs">
             <span className="w-2 h-2 rounded-full bg-emerald-400" />
@@ -116,13 +120,13 @@ export default function WishPage(): JSX.Element {
             </div>
           </div>
 
-          {/* banner preview */}
+        {/* Banner preview */}
           <div className="relative rounded-xl overflow-hidden bg-gradient-to-br from-indigo-700/20 to-sky-500/10 border border-white/10 min-h-[180px]">
             <div className="absolute right-3 bottom-3 text-xs bg-black/60 px-2 py-1 rounded text-amber-300">
               ★★★★★ Windblade Duelist
             </div>
             <Image
-              src={imgSrc({ art: "Windblade Duelist.png", kind: "character" })}
+              src={imgSrc({ art: "Windblade Duelist.png", kind: "character", artUrl: "", name: "Windblade Duelist" })}
               alt="Windblade Duelist"
               fill
               className="object-contain opacity-70"
@@ -153,7 +157,7 @@ export default function WishPage(): JSX.Element {
           </button>
         </div>
 
-        {/* results after animation */}
+        {/* Results after animation */}
         {results.length > 0 && (
           <div className="mt-10">
             <div className="text-sm opacity-70 mb-3">Results</div>
@@ -181,7 +185,7 @@ export default function WishPage(): JSX.Element {
         )}
       </section>
 
-      {/* overlay cinema */}
+      {/* Overlay cinema */}
       <WishCinema
         open={!!cinemaItems}
         results={cinemaItems || []}

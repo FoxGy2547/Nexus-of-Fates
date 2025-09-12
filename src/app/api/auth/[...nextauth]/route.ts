@@ -1,16 +1,16 @@
 // src/app/api/auth/[...nextauth]/route.ts
 import NextAuth, { type NextAuthOptions } from "next-auth";
-import Discord from "next-auth/providers/discord";
-import { createClient } from "@supabase/supabase-js";
+import DiscordProvider from "next-auth/providers/discord";
+import { queryOne } from "@/lib/db";
 
 /** Next.js route config */
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/** ==== Extend types for token & session ==== */
+/* ---- Extend token & session ---- */
 declare module "next-auth/jwt" {
   interface JWT {
-    uid?: string;           // our internal id (supabase public.users.id as string) or discord id fallback
+    uid?: string;
     name?: string | null;
     picture?: string | null;
   }
@@ -26,21 +26,18 @@ declare module "next-auth" {
   }
 }
 
-/** ---- Supabase (optional but preferred) ---- */
-const SUPA_URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
-const SUPA_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
-const SUPA_ON = Boolean(SUPA_URL && SUPA_SERVICE_ROLE);
-const supa = SUPA_ON
-  ? createClient(SUPA_URL, SUPA_SERVICE_ROLE, { auth: { persistSession: false } })
-  : null;
-
+/* ---- DB row ---- */
 type UserIdRow = { id: number };
 
-/** ==== NextAuth options (JWT only, no Adapter DB) ==== */
+/* ---- Helper type for discord profile ---- */
+type MaybeDiscordProfile = Partial<
+  Record<"email" | "global_name" | "username" | "name" | "image_url" | "avatar", string>
+>;
+
 const authOptions: NextAuthOptions = {
   session: { strategy: "jwt" },
   providers: [
-    Discord({
+    DiscordProvider({
       clientId: process.env.DISCORD_CLIENT_ID ?? "",
       clientSecret: process.env.DISCORD_CLIENT_SECRET ?? "",
       authorization: { params: { scope: "identify email" } },
@@ -48,57 +45,45 @@ const authOptions: NextAuthOptions = {
   ],
   callbacks: {
     async jwt({ token, account, user, profile }) {
-      // derive discord id (or fallback to token.sub)
+      // ข้อมูลจาก provider / token
       const discordId: string =
         account?.provider === "discord" ? account.providerAccountId : (token.sub ?? "");
 
-      const p = (profile ?? {}) as Record<string, unknown>;
+      const p = (profile ?? null) as MaybeDiscordProfile | null;
 
-      const email: string | null =
-        (token.email as string | undefined) ??
-        (user?.email ?? null);
-
+      const email: string | null = token.email ?? user?.email ?? p?.email ?? null;
       const username: string | null =
-        (token.name as string | undefined) ??
-        (user?.name ??
-          (p["global_name"] as string | undefined) ??
-          (p["username"] as string | undefined) ??
-          (p["name"] as string | undefined) ??
-          null);
-
+        token.name ?? user?.name ?? p?.global_name ?? p?.username ?? p?.name ?? null;
       const avatar: string | null =
-        (token.picture as string | undefined) ??
-        (user?.image ??
-          (p["image_url"] as string | undefined) ??
-          (p["avatar"] as string | undefined) ??
-          null);
+        token.picture ?? user?.image ?? p?.image_url ?? p?.avatar ?? null;
 
-      let uid = discordId;
+      let uid: string = discordId;
 
-      // upsert ผู้ใช้ลง Supabase ถ้ามีค่า env ครบ
-      if (SOPA_ON && supa) {
+      /**
+       * สำคัญ: ทำ upsert เฉพาะ "ครั้งแรก" ที่มี account (ตอนกลับจาก Discord)
+       * เพื่อตัดรอบเรียกซ้ำที่ทำให้ sequence กระโดด
+       */
+      if (account?.provider === "discord") {
         try {
-          const { data, error } = await supa
-            .from("users")
-            .upsert(
-              {
-                discord_id: discordId,
-                email,
-                username,
-                avatar,
-              },
-              { onConflict: "discord_id" },
-            )
-            .select("id")
-            .maybeSingle();
-          if (!error && data?.id) uid = String((data as UserIdRow).id);
+          const row = await queryOne<UserIdRow>(
+            `
+            insert into public.users (discord_id, email, username, avatar, nexus_deal)
+            values ($1, $2, $3, $4, 80)
+            on conflict (discord_id) do update
+              set email    = excluded.email,
+                  username = excluded.username,
+                  avatar   = excluded.avatar
+            returning id;
+            `,
+            [discordId, email, username, avatar]
+          );
+          if (row?.id) uid = String(row.id);
         } catch (err) {
-          console.warn("[nextauth] supabase upsert skipped:", err);
+          console.warn("[nextauth] DB skipped:", err);
         }
-      } else {
-        console.warn("[nextauth] Supabase env missing — skip DB upsert");
       }
 
+      // เติมข้อมูลลง token
       token.uid = uid;
       if (username !== undefined) token.name = username;
       if (avatar !== undefined) token.picture = avatar;
@@ -124,6 +109,3 @@ const authOptions: NextAuthOptions = {
 
 const handler = NextAuth(authOptions);
 export { handler as GET, handler as POST };
-
-// tiny typo fix above
-const SOPA_ON = SUPA_ON;
