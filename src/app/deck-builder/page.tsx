@@ -52,10 +52,12 @@ type SaveBody = {
   cards: { cardId: number; count: number }[];
 };
 
-/* -------- deck response types -------- */
+/* deck response */
 type DeckData = {
   name?: string;
-  [key: string]: unknown; // ใช้เฉพาะ card_char1..3 และ card1..card20
+  characters?: number[];
+  cards?: { cardId: number; count: number }[];
+  [key: string]: unknown; // รองรับคอลัมน์ card_char1..3, card1..20
 };
 type DeckResp =
   | { ok: true; deck: DeckData }
@@ -89,7 +91,7 @@ async function postJSON<T>(url: string, body: unknown): Promise<T> {
 }
 
 /** inventory → {chars, others}
- *  ยืดหยุ่น: รองรับ items[], และคีย์ char_#/char#, card_#/card#
+ *  ยืดหยุ่น: items[] / char_#/char# / card_#/card#
  */
 function normalizeInventory(raw: unknown): Inventory {
   const empty: Inventory = { userId: 0, chars: {}, others: {} };
@@ -106,7 +108,7 @@ function normalizeInventory(raw: unknown): Inventory {
       const kind = String(it.kind ?? "");
       if (!Number.isFinite(id) || qty <= 0) continue;
       if (kind === "character") inv.chars[id] = qty;
-      else inv.others[id >= 101 ? id - 100 : id] = qty; // เผื่อฝั่งอื่นส่ง 101..103 มา
+      else inv.others[id >= 101 ? id - 100 : id] = qty; // กันกรณีฝั่งอื่นส่ง 101..103
     }
     return inv;
   }
@@ -121,7 +123,6 @@ function normalizeInventory(raw: unknown): Inventory {
     others: {},
   };
 
-  // ออบเจกต์ย่อย
   if (typeof row.chars === "object" && row.chars && !Array.isArray(row.chars)) {
     for (const [k, v] of Object.entries(row.chars as Record<string, unknown>)) inv.chars[Number(k)] = Number(v ?? 0);
   }
@@ -129,7 +130,7 @@ function normalizeInventory(raw: unknown): Inventory {
     for (const [k, v] of Object.entries(row.others as Record<string, unknown>)) inv.others[Number(k)] = Number(v ?? 0);
   }
 
-  // คีย์กระจาย: char_#/char#, card_#/card#
+  // คีย์กระจาย
   for (const [k, v] of Object.entries(row)) {
     if (typeof v === "number" || typeof v === "string") {
       const mCharUnd = /^char_(\d+)$/.exec(k);
@@ -239,19 +240,32 @@ function PageInner() {
         if (deck) {
           setName((deck.name as string) || "My Deck");
 
-          // ===== Characters from deck: card_char1..card_char3 =====
-          const charIds: number[] = [];
-          for (let i = 1; i <= 3; i++) {
-            const v = Number((deck as Record<string, unknown>)[`card_char${i}`] ?? 0);
-            if (v) charIds.push(v);
+          // ===== Characters =====
+          let charIds: number[] = [];
+          if (Array.isArray(deck.characters) && deck.characters.length > 0) {
+            charIds = deck.characters.map(Number);
+          } else {
+            for (let i = 1; i <= 3; i++) {
+              const v = Number((deck as Record<string, unknown>)[`card_char${i}`] ?? 0);
+              if (v) charIds.push(v);
+            }
           }
           setSelChars(charIds);
 
-          // ===== Others from deck: card1..card20 (ค่า 1/2/3 ต่อสล็อต → สะสม) =====
+          // ===== Others (supports/events) =====
           const picked: Record<number, number> = {};
-          for (let i = 1; i <= 20; i++) {
-            const v = Number((deck as Record<string, unknown>)[`card${i}`] ?? 0);
-            if (v > 0) picked[v] = (picked[v] ?? 0) + 1;
+          if (Array.isArray(deck.cards) && deck.cards.length > 0) {
+            for (const it of deck.cards as Array<{ cardId: number; count: number }>) {
+              const rawId = Number(it.cardId);
+              const uiId = rawId >= 101 ? rawId - 100 : rawId; // เผื่อ API เก่า
+              if (!uiId) continue;
+              picked[uiId] = (picked[uiId] ?? 0) + Number(it.count ?? 0);
+            }
+          } else {
+            for (let i = 1; i <= 20; i++) {
+              const v = Number((deck as Record<string, unknown>)[`card${i}`] ?? 0);
+              if (v > 0) picked[v] = (picked[v] ?? 0) + 1;
+            }
           }
           setSelOthers(picked);
         } else {
