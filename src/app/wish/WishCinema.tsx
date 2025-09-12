@@ -30,8 +30,8 @@ function highestRarity(items: WishItem[]): 3 | 4 | 5 {
 }
 
 /* ============ component ============ */
-const INTRO_MS = 1300;            // meteor flight
-const REVEAL_EACH_MS = 650;
+const INTRO_MS = 800;            // meteor flight
+const REVEAL_EACH_MS = 420;
 
 export default function WishCinema({ open, results, onDone }: Props) {
   const hasData = results.length > 0;
