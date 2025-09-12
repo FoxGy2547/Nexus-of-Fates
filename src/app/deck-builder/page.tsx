@@ -1,4 +1,3 @@
-// src/app/deck-builder/page.tsx
 "use client";
 
 import React, { Suspense, useEffect, useMemo, useState } from "react";
@@ -222,8 +221,8 @@ function PortraitCardImage({ src, alt }: { src: string; alt: string }) {
 
 /* ================= Page ================= */
 function PageInner() {
-  const sp = useSearchParams();
   const router = useRouter();
+  const sp = useSearchParams();
   const qsUserId = Number(sp.get("userId") ?? 0) || 0;
 
   const [userId, setUserId] = useState<number>(qsUserId);
@@ -236,6 +235,7 @@ function PageInner() {
   const othersTotal = useMemo(() => Object.values(selOthers).reduce((a, b) => a + b, 0), [selOthers]);
   const canAddMore = othersTotal < 20;
 
+  // ถ้าไม่มี ?userId= ลอง /api/me
   useEffect(() => {
     if (qsUserId) return;
     (async () => {
@@ -243,14 +243,18 @@ function PageInner() {
         const me = await getJSON<MeResp>("/api/me");
         const uid = Number(me.user?.id ?? 0);
         if (uid) setUserId(uid);
-      } catch {}
+      } catch {
+        /* ignore */
+      }
     })();
   }, [qsUserId]);
 
+  // sync ?userId=
   useEffect(() => {
     if (qsUserId && qsUserId !== userId) setUserId(qsUserId);
   }, [qsUserId, userId]);
 
+  // โหลด inventory + deck → พรีฟิล
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -285,12 +289,13 @@ function PageInner() {
     };
   }, [userId]);
 
+  // ====== เลือก/แก้จำนวน ======
   function toggleChar(id: number) {
     setSelChars((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : prev.length >= 3 ? prev : [...prev, id]));
   }
 
   function addOther(id: number) {
-    if (othersTotal >= 20) return;
+    if (othersTotal >= 20) return; // กันระดับ UI
     setSelOthers((prev) => {
       const totalPrev = Object.values(prev).reduce((a, b) => a + b, 0);
       if (totalPrev >= 20) return prev;
@@ -318,7 +323,7 @@ function PageInner() {
       name,
       characters: selChars,
       cards: Object.entries(selOthers).map(([id, count]) => ({
-        cardId: Number(id),
+        cardId: Number(id), // 1..3
         count: Number(count),
       })),
     };
@@ -330,6 +335,7 @@ function PageInner() {
     }
   }
 
+  // ========== FILTER ==========
   const VISIBLE_CHAR_CARDS = useMemo(() => {
     const show = new Set<number>();
     if (inv?.chars) {
@@ -356,13 +362,13 @@ function PageInner() {
         >
           Exit
         </button>
-        <div className="opacity-70">Loading deck…</div>
+        <div className="pt-12 opacity-70">Loading deck…</div>
       </main>
     );
   }
 
   return (
-    <main className="min-h-screen p-6 flex flex-col gap-6">
+    <main className="min-h-screen p-6">
       {/* Exit button */}
       <button
         onClick={() => router.push("/")}
@@ -372,114 +378,117 @@ function PageInner() {
         Exit
       </button>
 
-      <header className="flex items-center gap-3">
-        <input
-          className="px-3 py-2 rounded bg-neutral-800 flex-1"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="Deck name"
-        />
-        <div className="text-sm opacity-70">Chars {selChars.length}/3</div>
-        <div className={`text-sm ${othersTotal > 20 ? "text-rose-400" : "opacity-70"}`}>
-          Others {othersTotal}/20
-        </div>
-        <button className="px-4 py-2 rounded bg-emerald-600" onClick={onSave}>
-          Save
-        </button>
-      </header>
+      {/* เว้นเฉพาะ content ให้พ้นปุ่ม */}
+      <div className="pt-12 flex flex-col gap-6">
+        <header className="flex items-center gap-3">
+          <input
+            className="px-3 py-2 rounded bg-neutral-800 flex-1"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Deck name"
+          />
+          <div className="text-sm opacity-70">Chars {selChars.length}/3</div>
+          <div className={`text-sm ${othersTotal > 20 ? "text-rose-400" : "opacity-70"}`}>
+            Others {othersTotal}/20
+          </div>
+          <button className="px-4 py-2 rounded bg-emerald-600" onClick={onSave}>
+            Save
+          </button>
+        </header>
 
-      {/* Characters */}
-      <section>
-        <div className="font-semibold mb-2">Characters</div>
+        {/* Characters */}
+        <section>
+          <div className="font-semibold mb-2">Characters</div>
 
-        {!inv && <div className="opacity-70 text-sm">Loading inventory…</div>}
+          {!inv && <div className="opacity-70 text-sm">Loading inventory…</div>}
 
-        <div className="flex flex-wrap gap-3">
-          {VISIBLE_CHAR_CARDS.map((c) => {
-            const owned = inv?.chars?.[c.id] ?? 0;
-            const selected = selChars.includes(c.id);
-            return (
-              <button
-                key={c.id}
-                className={`relative border p-3 text-left rounded-xl ${
-                  selected ? "border-emerald-500" : "border-white/10"
-                } bg-black/20 hover:bg-black/30`}
-                style={{ width: CARD_W }}
-                onClick={() => toggleChar(c.id)}
-                title="กดเพื่อเลือก/เอาออก"
-              >
-                <div className="absolute left-2 top-2 z-10">
-                  <Badge>#{c.id}</Badge>
-                </div>
-                <div className="absolute right-2 top-2 z-10">
-                  <Badge>owned {owned}</Badge>
-                </div>
-                <div className="mt-3">
-                  <PortraitCardImage src={cardImg(c.art, "character")} alt={c.code} />
-                </div>
-                <div className="mt-2 font-medium truncate">{c.name || c.code.replaceAll("_", " ")}</div>
-              </button>
-            );
-          })}
-        </div>
-      </section>
-
-      {/* Supports & Events */}
-      <section>
-        <div className="font-semibold mb-2">Supports & Events</div>
-
-        {!inv && <div className="opacity-70 text-sm">Loading inventory…</div>}
-
-        <div className="flex flex-wrap gap-3">
-          {VISIBLE_OTHER_CARDS.map((o) => {
-            const owned = inv?.others?.[o.id] ?? 0;
-            const picked = selOthers[o.id] ?? 0;
-            const selectedClass = picked > 0 ? "border-emerald-500" : "border-white/10";
-            const disableAdd = !canAddMore;
-
-            return (
-              <div
-                key={`${o.kind}-${o.id}`}
-                className={`relative border ${selectedClass} p-3 rounded-xl bg-black/20 hover:bg-black/30`}
-                style={{ width: CARD_W }}
-              >
-                <div className="absolute left-2 top-2 z-20">
-                  <Badge>#{o.id}</Badge>
-                </div>
-                <div className="absolute left-12 top-2 z-20">
-                  <Badge>owned {owned}</Badge>
-                </div>
-
-                {picked > 0 && (
-                  <button
-                    className="absolute right-2 top-2 z-30 rounded bg-rose-600 px-1.5 py-0.5 text-[11px]"
-                    onClick={() => decOther(o.id)}
-                    title="ลบ 1 ใบ"
-                  >
-                    −
-                  </button>
-                )}
-
+          <div className="flex flex-wrap gap-3">
+            {VISIBLE_CHAR_CARDS.map((c) => {
+              const owned = inv?.chars?.[c.id] ?? 0;
+              const selected = selChars.includes(c.id);
+              return (
                 <button
-                  className={`block w-full text-left relative z-0 ${disableAdd ? "cursor-not-allowed opacity-50" : ""}`}
-                  onClick={disableAdd ? undefined : () => addOther(o.id)}
-                  title={disableAdd ? "เด็ค Others เต็ม 20 ใบแล้ว" : "กดการ์ดเพื่อเพิ่ม 1 ใบ"}
-                  aria-disabled={disableAdd}
+                  key={c.id}
+                  className={`relative border p-3 text-left rounded-xl ${
+                    selected ? "border-emerald-500" : "border-white/10"
+                  } bg-black/20 hover:bg-black/30`}
+                  style={{ width: CARD_W }}
+                  onClick={() => toggleChar(c.id)}
+                  title="กดเพื่อเลือก/เอาออก"
                 >
-                  <PortraitCardImage src={cardImg(o.art, o.kind)} alt={o.code} />
-                  <div className="mt-2 font-medium truncate">{o.name || o.code.replaceAll("_", " ")}</div>
-                </button>
-
-                {picked > 0 && (
-                  <div className="absolute right-2 bottom-2 z-20">
-                    <Badge>{picked}</Badge>
+                  <div className="absolute left-2 top-2 z-10">
+                    <Badge>#{c.id}</Badge>
                   </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </section>
+                  <div className="absolute right-2 top-2 z-10">
+                    <Badge>owned {owned}</Badge>
+                  </div>
+                  <div className="mt-3">
+                    <PortraitCardImage src={cardImg(c.art, "character")} alt={c.code} />
+                  </div>
+                  <div className="mt-2 font-medium truncate">{c.name || c.code.replaceAll("_", " ")}</div>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+
+        {/* Supports & Events */}
+        <section>
+          <div className="font-semibold mb-2">Supports & Events</div>
+
+          {!inv && <div className="opacity-70 text-sm">Loading inventory…</div>}
+
+          <div className="flex flex-wrap gap-3">
+            {VISIBLE_OTHER_CARDS.map((o) => {
+              const owned = inv?.others?.[o.id] ?? 0;
+              const picked = selOthers[o.id] ?? 0;
+              const selectedClass = picked > 0 ? "border-emerald-500" : "border-white/10";
+              const disableAdd = !canAddMore;
+
+              return (
+                <div
+                  key={`${o.kind}-${o.id}`}
+                  className={`relative border ${selectedClass} p-3 rounded-xl bg-black/20 hover:bg-black/30`}
+                  style={{ width: CARD_W }}
+                >
+                  <div className="absolute left-2 top-2 z-20">
+                    <Badge>#{o.id}</Badge>
+                  </div>
+                  <div className="absolute left-12 top-2 z-20">
+                    <Badge>owned {owned}</Badge>
+                  </div>
+
+                  {picked > 0 && (
+                    <button
+                      className="absolute right-2 top-2 z-30 rounded bg-rose-600 px-1.5 py-0.5 text-[11px]"
+                      onClick={() => decOther(o.id)}
+                      title="ลบ 1 ใบ"
+                    >
+                      −
+                    </button>
+                  )}
+
+                  <button
+                    className={`block w-full text-left relative z-0 ${disableAdd ? "cursor-not-allowed opacity-50" : ""}`}
+                    onClick={disableAdd ? undefined : () => addOther(o.id)}
+                    title={disableAdd ? "เด็ค Others เต็ม 20 ใบแล้ว" : "กดการ์ดเพื่อเพิ่ม 1 ใบ"}
+                    aria-disabled={disableAdd}
+                  >
+                    <PortraitCardImage src={cardImg(o.art, o.kind)} alt={o.code} />
+                    <div className="mt-2 font-medium truncate">{o.name || o.code.replaceAll("_", " ")}</div>
+                  </button>
+
+                  {picked > 0 && (
+                    <div className="absolute right-2 bottom-2 z-20">
+                      <Badge>{picked}</Badge>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      </div>
     </main>
   );
 }
