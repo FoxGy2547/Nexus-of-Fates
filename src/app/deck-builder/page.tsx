@@ -53,7 +53,7 @@ type SaveBody = {
 };
 
 type DeckResp =
-  | { ok: true; deck: { name: string; characters: number[]; cards: { cardId: number; count: number }[] } }
+  | { ok: true; deck: Record<string, any> } // รองรับทั้งทรง array และทรง column
   | { ok: true; deck?: undefined };
 
 type MeResp = { ok: boolean; user?: { id: number } };
@@ -83,23 +83,18 @@ async function postJSON<T>(url: string, body: unknown): Promise<T> {
   return (txt ? JSON.parse(txt) : ({} as T)) as T;
 }
 
-/** แปลงไอดีการ์ดอื่นๆ (support/event) ระหว่าง UI ↔ DB */
+/** map id การ์ดอื่นๆ ระหว่าง UI ↔ DB */
 const toUiOtherId = (dbId: number) => (dbId >= 101 ? dbId - 100 : dbId);
 const toDbOtherId = (uiId: number) => (uiId >= 101 ? uiId : uiId + 100);
 
-/** แปลง payload inventory เป็น {chars, others}
- *  รองรับ 2 รูปแบบ:
- *   A) row: { user_id, char_1..char_12, card_1..card_3 }
- *   B) items: [{ cardId, kind: "character"|"support"|"event", qty }]
- *      - สำหรับ support/event จะเป็น cardId = 101..103 → map กลับเป็น 1..3
- */
+/** inventory → {chars, others} */
 function normalizeInventory(raw: unknown): Inventory {
   const empty: Inventory = { userId: 0, chars: {}, others: {} };
   if (!raw || typeof raw !== "object") return empty;
 
   const top = raw as Record<string, unknown>;
 
-  // รูปแบบ B: items
+  // B) items[]
   if (Array.isArray(top.items)) {
     const inv: Inventory = { userId: Number(top.userId ?? 0) || 0, chars: {}, others: {} };
     for (const it of top.items as Array<Record<string, unknown>>) {
@@ -107,18 +102,13 @@ function normalizeInventory(raw: unknown): Inventory {
       const qty = Number(it.qty ?? 0);
       const kind = String(it.kind ?? "");
       if (!Number.isFinite(id) || qty <= 0) continue;
-      if (kind === "character") {
-        inv.chars[id] = qty;
-      } else {
-        // 101/102/103 -> 1/2/3
-        const slot = id >= 101 ? id - 100 : id;
-        inv.others[slot] = qty;
-      }
+      if (kind === "character") inv.chars[id] = qty;
+      else inv.others[id >= 101 ? id - 100 : id] = qty;
     }
     return inv;
   }
 
-  // รูปแบบ A: row เดี่ยว
+  // A) row เดี่ยว
   const row: Record<string, unknown> =
     typeof top.row === "object" && top.row ? (top.row as Record<string, unknown>) : top;
 
@@ -128,14 +118,11 @@ function normalizeInventory(raw: unknown): Inventory {
     others: {},
   };
 
-  // ถ้ามีทรงมาตรฐานอยู่แล้ว
   if (typeof row.chars === "object" && row.chars && !Array.isArray(row.chars)) {
-    const c = row.chars as Record<string, unknown>;
-    for (const [k, v] of Object.entries(c)) inv.chars[Number(k)] = Number(v ?? 0);
+    for (const [k, v] of Object.entries(row.chars as Record<string, unknown>)) inv.chars[Number(k)] = Number(v ?? 0);
   }
   if (typeof row.others === "object" && row.others && !Array.isArray(row.others)) {
-    const o = row.others as Record<string, unknown>;
-    for (const [k, v] of Object.entries(o)) inv.others[Number(k)] = Number(v ?? 0);
+    for (const [k, v] of Object.entries(row.others as Record<string, unknown>)) inv.others[Number(k)] = Number(v ?? 0);
   }
 
   // map char_*/card_* → inv
@@ -223,16 +210,37 @@ function PageInner() {
         const norm = normalizeInventory(invRaw);
         setInv(norm);
 
-        if (deckResp.deck) {
-          setName(deckResp.deck.name || "My Deck");
-          setSelChars(deckResp.deck.characters ?? []);
-          // 🔁 แปลง cardId จาก DB (101..103) → UI (1..3) แล้วเติมจำนวน
-          const rec: Record<number, number> = {};
-          for (const it of deckResp.deck.cards ?? []) {
-            const uiId = toUiOtherId(it.cardId);
-            rec[uiId] = (rec[uiId] ?? 0) + it.count;
+        const deck = deckResp.deck;
+        if (deck) {
+          setName(deck.name || "My Deck");
+
+          // ===== Characters =====
+          let charIds: number[] = Array.isArray(deck.characters) ? deck.characters : [];
+          if (charIds.length === 0) {
+            // รองรับฟิลด์แบบ column: card_char1..3
+            for (const key of ["card_char1", "card_char2", "card_char3"]) {
+              const v = Number(deck[key] ?? 0);
+              if (v) charIds.push(v);
+            }
           }
-          setSelOthers(rec);
+          setSelChars(charIds);
+
+          // ===== Others (supports/events) =====
+          const picked: Record<number, number> = {};
+          if (Array.isArray(deck.cards)) {
+            for (const it of deck.cards as Array<{ cardId: number; count: number }>) {
+              const uiId = toUiOtherId(Number(it.cardId));
+              if (!uiId) continue;
+              picked[uiId] = (picked[uiId] ?? 0) + Number(it.count ?? 0);
+            }
+          } else {
+            // รองรับฟิลด์แบบ column: card1..card15 (จำนวนใบ)
+            for (let i = 1; i <= 15; i++) {
+              const n = Number(deck[`card${i}`] ?? 0);
+              if (n > 0) picked[i] = n;
+            }
+          }
+          setSelOthers(picked);
         } else {
           setSelChars([]);
           setSelOthers({});
@@ -267,7 +275,7 @@ function PageInner() {
       userId,
       name,
       characters: selChars,
-      // 🔁 แปลงกลับ UI (1..3) → DB (101..103)
+      // UI (1..3) → DB (101..103)
       cards: Object.entries(selOthers).map(([id, count]) => ({
         cardId: toDbOtherId(Number(id)),
         count: Number(count),
@@ -354,10 +362,11 @@ function PageInner() {
           {VISIBLE_OTHER_CARDS.map((o) => {
             const owned = inv?.others?.[o.id] ?? 0; // >0 เสมอ
             const picked = selOthers[o.id] ?? 0;
+            const selectedClass = picked > 0 ? "border-emerald-500" : "border-white/10";
             return (
               <div
                 key={`${o.kind}-${o.id}`}
-                className="relative border border-white/10 p-3 rounded-xl bg-black/20 hover:bg-black/30"
+                className={`relative border ${selectedClass} p-3 rounded-xl bg-black/20 hover:bg-black/30`}
                 style={{ width: CARD_W }}
               >
                 <div className="absolute left-2 top-2 z-20">
