@@ -1,3 +1,4 @@
+// src/app/wish/page.tsx
 "use client";
 
 import React, { useEffect, useState } from "react";
@@ -5,7 +6,7 @@ import Image from "next/image";
 import WishCinema, { WishItem } from "./WishCinema";
 import { JSX } from "react/jsx-runtime";
 
-/* helpers */
+/* ------------------------ helpers ------------------------ */
 async function getJSON<T>(url: string): Promise<T> {
   const r = await fetch(url, { cache: "no-store" });
   const txt = await r.text().catch(() => "");
@@ -24,12 +25,12 @@ async function postJSON<T>(url: string, body: unknown): Promise<T> {
   return (txt ? JSON.parse(txt) : ({} as T)) as T;
 }
 
-/** สร้าง path รูปจาก art + kind (เข้ารหัสช่องว่างและอักษรพิเศษ) */
+/** ช่วยสร้าง path รูปจาก art + kind (เข้ารหัสชื่อไฟล์ที่มีเว้นวรรค/อักษรพิเศษ) */
 function cardImg(art: string, kind: WishItem["kind"]): string {
   return encodeURI(kind === "character" ? `/char_cards/${art}` : `/cards/${art}`);
 }
 
-/* types */
+/* ------------------------ types ------------------------ */
 type MeResp = { ok: boolean; user?: { id: number } };
 type WalletResp = { ok: boolean; user: { nexusPoint: number; nexusDeal: number; pity5: number } };
 type WishPostResp = {
@@ -38,6 +39,7 @@ type WishPostResp = {
   user: { nexusPoint: number; nexusDeal: number; pity5: number };
 };
 
+/* ======================== Page ========================= */
 export default function WishPage(): JSX.Element {
   const [userId, setUserId] = useState<number | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -128,7 +130,7 @@ export default function WishPage(): JSX.Element {
             </div>
           </div>
 
-          {/* ★ รูป banner — ใช้จาก cards.json จริง จะไม่พิมพ์ชื่อไฟล์ผิดอีก */}
+          {/* Banner preview (ตัวอย่างใช้ตัวละคร) */}
           <div className="relative rounded-xl overflow-hidden bg-gradient-to-br from-indigo-700/20 to-sky-500/10 border border-white/10 min-h-[180px]">
             <div className="absolute right-3 bottom-3 text-xs bg-black/60 px-2 py-1 rounded text-amber-300">
               ★★★★★ Windblade Duelist
@@ -155,7 +157,7 @@ export default function WishPage(): JSX.Element {
             <div className="text-xs opacity-70">ใช้ Nexus Deal ×1</div>
           </button>
 
-          <button
+        <button
             onClick={() => doWish(10)}
             disabled={!userId || loading || rolling}
             className="px-8 py-3 rounded-xl bg-emerald-700/30 border border-emerald-500/50 hover:bg-emerald-700/40 disabled:opacity-40"
@@ -182,6 +184,7 @@ export default function WishPage(): JSX.Element {
                   }`}
                 >
                   <div className="relative aspect-[2/3] rounded overflow-hidden bg-neutral-950">
+                    {/* ใช้ cardImg เพื่อให้ support/event ดึงจาก /cards และเข้ารหัสชื่อไฟล์ */}
                     <Image
                       src={cardImg(it.art, it.kind)}
                       alt={it.code}
