@@ -1,3 +1,4 @@
+// src/app/page.tsx
 "use client";
 
 import { useMemo, useState } from "react";
@@ -18,7 +19,9 @@ async function post<T>(body: unknown): Promise<T> {
 
   const rawText = await res.text().catch(() => "");
   let json: unknown = null;
-  try { json = rawText ? JSON.parse(rawText) : null; } catch {}
+  try {
+    json = rawText ? JSON.parse(rawText) : null;
+  } catch {}
   if (!res.ok) {
     const msg =
       ((json as { error?: string } | null)?.error) ??
@@ -40,7 +43,8 @@ function stableUserId(session: Session | null | undefined): string {
   if (typeof window === "undefined") return "ssr";
   const authId =
     (session?.user as { id?: string | null } | undefined)?.id ??
-    session?.user?.email ?? null;
+    session?.user?.email ??
+    null;
   if (authId) return String(authId);
   const key = "NOF_guestId";
   const existing = localStorage.getItem(key);
@@ -77,16 +81,26 @@ export default function Home() {
 
   const user: PlayerInfo = useMemo(() => {
     const id = stableUserId(session);
-    return { userId: id, name: session?.user?.name ?? "Player", avatar: session?.user?.image ?? null };
+    return {
+      userId: id,
+      name: session?.user?.name ?? "Player",
+      avatar: session?.user?.image ?? null,
+    };
   }, [session]);
 
   async function onCreate() {
     try {
       const roomId = (createCode || randRoom()).toUpperCase();
-      const res = await post<CreateJoinResponse>({ action: "createRoom", roomId, user });
+      const res = await post<CreateJoinResponse>({
+        action: "createRoom",
+        roomId,
+        user,
+      });
       router.push(`/play/${(res.roomId || roomId).toUpperCase()}`);
     } catch (e: unknown) {
-      alert(`Create failed: ${e instanceof Error ? e.message : "unknown"}`);
+      alert(
+        `Create failed: ${e instanceof Error ? e.message : "unknown"}`
+      );
     }
   }
 
@@ -94,7 +108,11 @@ export default function Home() {
     try {
       const roomId = (joinCode || "").trim().toUpperCase();
       if (!roomId) return alert("กรอกรหัสห้องก่อนนะ");
-      const res = await post<CreateJoinResponse>({ action: "joinRoom", roomId, user });
+      const res = await post<CreateJoinResponse>({
+        action: "joinRoom",
+        roomId,
+        user,
+      });
       router.push(`/play/${(res.roomId || roomId).toUpperCase()}`);
     } catch (e: unknown) {
       alert(`Join failed: ${e instanceof Error ? e.message : "unknown"}`);
@@ -112,19 +130,27 @@ export default function Home() {
             {session?.user?.image && (
               <Image
                 src={session.user.image}
-                alt={session.user?.name ? `${session.user.name} avatar` : ""}
+                alt={
+                  session.user?.name ? `${session.user.name} avatar` : ""
+                }
                 width={32}
                 height={32}
                 className="rounded-full"
               />
             )}
             <span>{session?.user?.name ?? "Discord User"}</span>
-            <button className="px-3 py-1 rounded bg-red-600" onClick={() => signOut()}>
+            <button
+              className="px-3 py-1 rounded bg-red-600"
+              onClick={() => signOut()}
+            >
               Logout
             </button>
           </>
         ) : (
-          <button className="px-3 py-1 rounded bg-indigo-600" onClick={() => signIn("discord")}>
+          <button
+            className="px-3 py-1 rounded bg-indigo-600"
+            onClick={() => signIn("discord")}
+          >
             Login with Discord
           </button>
         )}
@@ -139,13 +165,20 @@ export default function Home() {
               className="px-3 py-2 rounded bg-neutral-800 flex-1"
               placeholder="ROOM CODE (เว้นว่างให้สุ่มได้)"
               value={createCode}
-              onChange={(e) => setCreateCode(e.target.value.toUpperCase())}
+              onChange={(e) =>
+                setCreateCode(e.target.value.toUpperCase())
+              }
             />
-            <button className="px-4 py-2 rounded bg-emerald-600" onClick={onCreate}>
+            <button
+              className="px-4 py-2 rounded bg-emerald-600"
+              onClick={onCreate}
+            >
               Create
             </button>
           </div>
-          <p className="mt-2 text-xs opacity-70">โฮสต์จะถูกกำหนดเป็นฝั่ง p1 โดยอัตโนมัติ</p>
+          <p className="mt-2 text-xs opacity-70">
+            โฮสต์จะถูกกำหนดเป็นฝั่ง p1 โดยอัตโนมัติ
+          </p>
         </div>
 
         <div className="rounded-xl border border-white/10 p-4 bg-black/20">
@@ -155,7 +188,9 @@ export default function Home() {
               className="px-3 py-2 rounded bg-neutral-800 flex-1"
               placeholder="เช่น ABC123"
               value={joinCode}
-              onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
+              onChange={(e) =>
+                setJoinCode(e.target.value.toUpperCase())
+              }
             />
             <button
               className="px-4 py-2 rounded bg-sky-600"
@@ -168,7 +203,7 @@ export default function Home() {
         </div>
       </section>
 
-      {/* deck builder entry — ใช้คลังการ์ดของผู้ที่ล็อกอินอัตโนมัติ */}
+      {/* deck builder entry */}
       <section className="rounded-xl border border-white/10 p-4 bg-black/20">
         <div className="flex flex-wrap items-center gap-3">
           <div className="font-semibold">Deck Builder</div>
@@ -185,6 +220,26 @@ export default function Home() {
               Open Deck Builder
             </button>
           </div>
+        </div>
+      </section>
+
+      {/* wish / gacha entry */}
+      <section className="rounded-xl border border-white/10 p-4 bg-black/20">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="font-semibold">Gacha / Wish</div>
+          <span className="text-sm opacity-70">
+            สุ่มด้วย Nexus Deal ที่แลกจาก Nexus Point — มีแบนเนอร์สวย ๆ ให้กดเล่นเพลิน ๆ
+          </span>
+        </div>
+        <div className="mt-3 flex gap-2">
+          <button
+            className="px-4 py-2 rounded bg-amber-600 hover:bg-amber-500 disabled:opacity-50"
+            onClick={() => router.push("/wish")}
+            disabled={status !== "authenticated"}
+            title={status !== "authenticated" ? "ล็อกอินก่อนนะ" : ""}
+          >
+            Open Wish
+          </button>
         </div>
       </section>
     </main>

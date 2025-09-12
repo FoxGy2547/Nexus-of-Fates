@@ -12,6 +12,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.57.4",
     "@upstash/redis": "^1.35.3",
+    "framer-motion": "^12.23.12",
     "mysql2": "^3.14.4",
     "next": "15.5.2",
     "next-auth": "^4.24.11",
