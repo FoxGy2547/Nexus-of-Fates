@@ -1,17 +1,17 @@
+// src/app/wish/page.tsx
 "use client";
 
 import React, { useEffect, useState } from "react";
 import Image from "next/image";
-import { JSX } from "react/jsx-runtime";
+import WishCinema, { WishItem } from "./WishCinema";
 
-/* ================= helpers ================ */
+/* ------------- helpers ------------- */
 async function getJSON<T>(url: string): Promise<T> {
   const r = await fetch(url, { cache: "no-store" });
   const txt = await r.text().catch(() => "");
   if (!r.ok) throw new Error(txt || r.statusText);
   return (txt ? JSON.parse(txt) : ({} as T)) as T;
 }
-
 async function postJSON<T>(url: string, body: unknown): Promise<T> {
   const r = await fetch(url, {
     method: "POST",
@@ -24,31 +24,22 @@ async function postJSON<T>(url: string, body: unknown): Promise<T> {
   return (txt ? JSON.parse(txt) : ({} as T)) as T;
 }
 
-/* ================= types ================ */
+/** สร้าง path รูปจาก kind + art */
+function artPath(it: Pick<WishItem, "kind" | "art">): string {
+  return encodeURI(it.kind === "character" ? `/char_cards/${it.art}` : `/cards/${it.art}`);
+}
+
+/* ------------- types ------------- */
 type MeResp = { ok: boolean; user?: { id: number } };
-
-type WalletResp = {
-  ok: boolean;
-  user: { nexusPoint: number; nexusDeal: number; pity5: number };
-};
-
-type WishItem = {
-  rarity: 3 | 4 | 5;
-  id: number;
-  code: string;
-  name: string;
-  kind: "character" | "support" | "event";
-  artUrl: string;
-};
-
+type WalletResp = { ok: boolean; user: { nexusPoint: number; nexusDeal: number; pity5: number } };
 type WishPostResp = {
   ok: boolean;
   items: WishItem[];
   user: { nexusPoint: number; nexusDeal: number; pity5: number };
 };
 
-/* ================ page ================ */
-export default function WishPage(): JSX.Element {
+/* ------------- page ------------- */
+export default function WishPage() {
   const [userId, setUserId] = useState<number | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [rolling, setRolling] = useState<boolean>(false);
@@ -59,23 +50,24 @@ export default function WishPage(): JSX.Element {
     pity5: 0,
   });
 
+  // ผลลัพธ์ล่าสุด (ไว้โชว์ด้านล่างหลังปิดแอนิเมชัน)
   const [results, setResults] = useState<WishItem[]>([]);
 
-  // โหลด user id + wallet
+  // ชุดไอเท็มที่จะส่งเข้า overlay แอนิเมชัน
+  const [cinemaItems, setCinemaItems] = useState<WishItem[] | null>(null);
+
   useEffect(() => {
     (async () => {
       try {
         setLoading(true);
         const me = await getJSON<MeResp>("/api/me");
-        const uid = Number(me.user?.id ?? 0);
-        setUserId(uid || null);
-
+        const uid = Number(me.user?.id ?? 0) || null;
+        setUserId(uid);
         if (uid) {
           const w = await getJSON<WalletResp>(`/api/gacha/wish?userId=${uid}`);
           setWallet({ np: w.user.nexusPoint, deal: w.user.nexusDeal, pity5: w.user.pity5 });
         }
       } catch (e) {
-        // เงียบไว้ก็ได้ จะได้ไม่เด้ง alert ตอนยังไม่ล็อกอิน
         console.error(e);
       } finally {
         setLoading(false);
@@ -90,9 +82,13 @@ export default function WishPage(): JSX.Element {
       const r = await postJSON<WishPostResp>("/api/gacha/wish", {
         userId,
         times,
-        autoConvertNP: true, // ให้แลก NP -> Deal อัตโนมัติถ้าจำเป็น
+        autoConvertNP: true,
       });
-      setResults(r.items);
+
+      // เปิด overlay แอนิเมชันด้วยผลลัพธ์
+      setCinemaItems(r.items);
+
+      // อัปเดตกระเป๋า
       setWallet({ np: r.user.nexusPoint, deal: r.user.nexusDeal, pity5: r.user.pity5 });
     } catch (e) {
       alert(e instanceof Error ? e.message : String(e));
@@ -116,21 +112,27 @@ export default function WishPage(): JSX.Element {
           <div className="space-y-2">
             <h1 className="text-3xl font-bold">Wanderlust Invocation</h1>
             <p className="opacity-80 text-sm">
-              Standard wishes have no time limit. Every 10 wishes is guaranteed to include at least one 4★ or higher item.
+              Standard wishes have no time limit. Every 10 wishes is guaranteed to include at least one 4★ or
+              higher item.
             </p>
             <button className="text-xs opacity-70 hover:opacity-100 underline underline-offset-4">
               View Details for more.
             </button>
 
             <div className="mt-4 text-sm opacity-80">
-              <span className="mr-4">Nexus Point: <b>{wallet.np}</b></span>
-              <span className="mr-4">Nexus Deal: <b>{wallet.deal}</b></span>
-              <span>Pity5: <b>{wallet.pity5}</b></span>
+              <span className="mr-4">
+                Nexus Point: <b>{wallet.np}</b>
+              </span>
+              <span className="mr-4">
+                Nexus Deal: <b>{wallet.deal}</b>
+              </span>
+              <span>
+                Pity5: <b>{wallet.pity5}</b>
+              </span>
             </div>
           </div>
 
           <div className="relative rounded-xl overflow-hidden bg-gradient-to-br from-indigo-700/20 to-sky-500/10 border border-white/10 min-h-[180px]">
-            {/* รูป banner ตัวหน้าตู้ (วางภาพจริงภายหลังได้) */}
             <div className="absolute right-3 bottom-3 text-xs bg-black/60 px-2 py-1 rounded text-amber-300">
               ★★★★★ Windblade Duelist
             </div>
@@ -165,7 +167,7 @@ export default function WishPage(): JSX.Element {
           </button>
         </div>
 
-        {/* แสดงผลลัพธ์แบบง่าย ๆ (ไว้ต่อยอดทำแอนิเมชัน) */}
+        {/* Results หลังปิดแอนิเมชัน */}
         {results.length > 0 && (
           <div className="mt-10">
             <div className="text-sm opacity-70 mb-3">Results</div>
@@ -180,16 +182,19 @@ export default function WishPage(): JSX.Element {
                       ? "border-violet-400"
                       : "border-sky-400"
                   }`}
-                  title={`#${it.id} ${it.name}`}
                 >
-                  <div className="relative aspect-[2/3] rounded overflow-hidden bg-neutral-900">
-                    <Image src={it.artUrl} alt={it.code} fill className="object-contain" unoptimized />
+                  <div className="relative aspect-[2/3] rounded overflow-hidden bg-neutral-950">
+                    <Image src={artPath(it)} alt={it.code} fill className="object-contain" unoptimized />
                   </div>
                   <div className="mt-1 text-xs truncate">
-                    <span className={it.rarity === 5 ? "text-amber-300" : it.rarity === 4 ? "text-violet-300" : "text-sky-300"}>
+                    <span
+                      className={
+                        it.rarity === 5 ? "text-amber-300" : it.rarity === 4 ? "text-violet-300" : "text-sky-300"
+                      }
+                    >
                       {"★".repeat(it.rarity)}
                     </span>{" "}
-                    {it.name || it.code}
+                    {it.name || it.code.replaceAll("_", " ")}
                   </div>
                 </div>
               ))}
@@ -197,6 +202,16 @@ export default function WishPage(): JSX.Element {
           </div>
         )}
       </section>
+
+      {/* Overlay cinema (props ใหม่: results + onDone) */}
+      <WishCinema
+        open={!!cinemaItems}
+        results={cinemaItems || []}
+        onDone={() => {
+          if (cinemaItems) setResults(cinemaItems);
+          setCinemaItems(null);
+        }}
+      />
     </main>
   );
 }
