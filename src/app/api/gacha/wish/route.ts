@@ -1,3 +1,4 @@
+// src/app/api/gacha/wish/route.ts
 import { NextResponse } from "next/server";
 import { supa } from "@/lib/supabase";
 import cardsDataJson from "@/data/cards.json";
@@ -28,10 +29,8 @@ type PostBody = {
   autoConvertNP?: boolean;
 };
 
-/* ========================= cards pools =========================
-   ดึงจาก cards.json ตรง ๆ เพื่อให้ชื่อไฟล์ art ตรงกับ public */
+/* ========================= cards pools ========================= */
 type CardsData = typeof cardsDataJson;
-
 const CD = cardsDataJson as CardsData;
 
 const CHAR_POOL = CD.characters.map((c) => ({
@@ -60,14 +59,12 @@ const OTHER_POOL = [
   })),
 ];
 
-// 5★ แบนเนอร์หลัก (featured) + 5★ หลุดเรต (ตัวอื่น ๆ)
+// 5★ แบนเนอร์หลัก (featured) + 5★ หลุดเรต
 const FIVE_FEATURED = CHAR_POOL.filter((c) => c.code === "WINDBLADE_DUELIST");
 const FIVE_OFF = CHAR_POOL.filter((c) => c.code !== "WINDBLADE_DUELIST");
 
-// 4★ ใช้จาก OTHER_POOL ทั้งหมด
+// 4★/3★ ใช้จาก OTHER_POOL
 const FOUR_POOL = OTHER_POOL;
-
-// 3★ ใช้จาก OTHER_POOL เช่นกัน (เดิมตั้งไว้เป็น 3★)
 const THREE_POOL = OTHER_POOL;
 
 /* ========================= rates & pity ========================= */
@@ -86,11 +83,11 @@ function rollRarity(pity5: number, pullsSince4: number): 3 | 4 | 5 {
   // soft pity ช่วง 60+
   const base5 =
     pity5 + 1 >= RATES.fiveSoftFrom
-      ? RATES.fiveBase + (pity5 + 1 - RATES.fiveSoftFrom + 1) * 0.06 // เร่งความน่าจะเป็นช่วงท้าย
+      ? RATES.fiveBase + (pity5 + 1 - RATES.fiveSoftFrom + 1) * 0.06
       : RATES.fiveBase;
 
   // การันตี 4★ ทุก 10 ครั้ง
-  const must4 = (pullsSince4 + 1) >= RATES.fourGuaranteeSpan;
+  const must4 = pullsSince4 + 1 >= RATES.fourGuaranteeSpan;
 
   const r = Math.random();
   if (r < base5) return 5;
@@ -145,6 +142,44 @@ async function addToInventory(userId: number, it: WishItem) {
   }
 }
 
+/** ตัดยอด Support/Event เมื่อเกิน 20 ใบ แล้วแปลงเป็น NP (3 ใบ = 1 NP) */
+async function trimOthersOverflow(userId: number): Promise<{ addedNP: number }> {
+  // ดึง inventory แถวเดียวของผู้ใช้
+  const sel = await supa
+    .from("inventorys")
+    .select("*")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (sel.error || !sel.data) return { addedNP: 0 };
+
+  const row = sel.data as Record<string, unknown>;
+  let addedNP = 0;
+  const patch: Record<string, number> = {};
+
+  for (const [key, val] of Object.entries(row)) {
+    if (!key.startsWith("card_")) continue;
+    const count = Number(val ?? 0);
+    if (count > 20) {
+      const overflow = count - 20;
+      const convert = Math.floor(overflow / 3); // 3 ใบ = 1 NP
+      if (convert > 0) {
+        addedNP += convert;
+        const newCount = count - convert * 3; // ลดทีละ 3 ตามที่แปลง
+        patch[key] = newCount;               // อาจเหลือ 21/22 ถ้ายังมีเศษ 1–2 ใบ
+      }
+    }
+  }
+
+  if (Object.keys(patch).length) {
+    const upd = await supa.from("inventorys").update(patch).eq("user_id", userId);
+    if (upd.error) throw new Error(upd.error.message);
+  }
+
+  // ไม่อัปเดต users.nexus_point ตรงนี้ — ให้ผู้เรียกเป็นคนรวมเข้ากับ state แล้ว saveWallet ทีเดียว
+  return { addedNP };
+}
+
 /* ============================ GET =========================== */
 // GET: กระเป๋า (สำหรับโชว์บนหน้า)
 export async function GET(req: Request) {
@@ -155,7 +190,10 @@ export async function GET(req: Request) {
       return NextResponse.json({ error: "bad userId" }, { status: 400 });
     }
     const w = await getWallet(userId);
-    return NextResponse.json({ ok: true, user: { nexusPoint: w.nexusPoint, nexusDeal: w.nexusDeal, pity5: w.pity5 } });
+    return NextResponse.json({
+      ok: true,
+      user: { nexusPoint: w.nexusPoint, nexusDeal: w.nexusDeal, pity5: w.pity5 },
+    });
   } catch (e) {
     return NextResponse.json({ error: (e as Error).message }, { status: 400 });
   }
@@ -226,21 +264,33 @@ export async function POST(req: Request) {
       }
     }
 
-    // ตัดยอดดีล
+    // หักดีลที่ใช้
     w.nexusDeal -= times;
-
-    // เซฟกระเป๋า (รวม pity/guarantee)
-    await saveWallet(userId, { nexusDeal: w.nexusDeal, nexusPoint: w.nexusPoint, pity5, guarantee5 });
 
     // เพิ่มของเข้าคลัง
     for (const it of results) {
       await addToInventory(userId, it);
     }
 
+    // ตัดยอด Support/Event เกิน 20 → แปลงเป็น NP (3:1)
+    const { addedNP } = await trimOthersOverflow(userId);
+    if (addedNP > 0) {
+      w.nexusPoint += addedNP;
+    }
+
+    // เซฟกระเป๋า (รวม pity/guarantee และ NP ที่ได้จากการตัดยอด)
+    await saveWallet(userId, {
+      nexusDeal: w.nexusDeal,
+      nexusPoint: w.nexusPoint,
+      pity5,
+      guarantee5,
+    });
+
     return NextResponse.json({
       ok: true,
       items: results,
       user: { nexusPoint: w.nexusPoint, nexusDeal: w.nexusDeal, pity5 },
+      bonus: addedNP ? { nexusPointFromTrim: addedNP } : undefined,
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
