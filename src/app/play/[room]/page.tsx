@@ -63,9 +63,7 @@ const ELEMENT_ICON: Record<string, string> = {
   Infinite: "/dice/infinite.png",
 };
 
-/* ===================== image helper (ดึงจาก cards.json) ===================== */
-
-/** CODE → "Pretty Name" (BLAZE_KNIGHT -> Blaze Knight) */
+/* ===================== image helper ===================== */
 function codeToPrettyName(code: string): string {
   return (code || "")
     .split("_")
@@ -73,34 +71,14 @@ function codeToPrettyName(code: string): string {
     .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
     .join(" ");
 }
-
-/** map จาก code → art file (ตัวอักษรใหญ่หมดเพื่อเทียบแบบไม่งอแง) */
-const CHAR_ART = new Map<string, string>(
-  cardsData.characters.map((c) => [c.code.toUpperCase(), c.art]),
-);
-const SUPP_ART = new Map<string, string>(
-  cardsData.supports.map((c) => [c.code.toUpperCase(), c.art]),
-);
-const EVENT_ART = new Map<string, string>(
-  cardsData.events.map((c) => [c.code.toUpperCase(), c.art]),
-);
-
-/** คืน path รูปที่ถูกต้องตามชนิดการ์ด พร้อม encodeURI กันช่องว่าง */
+const CHAR_ART = new Map<string, string>(cardsData.characters.map((c) => [c.code.toUpperCase(), c.art]));
+const SUPP_ART = new Map<string, string>(cardsData.supports.map((c) => [c.code.toUpperCase(), c.art]));
+const EVENT_ART = new Map<string, string>(cardsData.events.map((c) => [c.code.toUpperCase(), c.art]));
 function imagePathByCode(code: string): string {
   const key = code.toUpperCase();
-  if (CHAR_ART.has(key)) {
-    const art = CHAR_ART.get(key)!;
-    return encodeURI(`/char_cards/${art}`);
-  }
-  if (SUPP_ART.has(key)) {
-    const art = SUPP_ART.get(key)!;
-    return encodeURI(`/cards/${art}`);
-  }
-  if (EVENT_ART.has(key)) {
-    const art = EVENT_ART.get(key)!;
-    return encodeURI(`/cards/${art}`);
-  }
-  // fallback เผื่ออนาคตมี code ใหม่แต่ยังไม่ใส่ art ในไฟล์
+  if (CHAR_ART.has(key)) return encodeURI(`/char_cards/${CHAR_ART.get(key)!}`);
+  if (SUPP_ART.has(key)) return encodeURI(`/cards/${SUPP_ART.get(key)!}`);
+  if (EVENT_ART.has(key)) return encodeURI(`/cards/${EVENT_ART.get(key)!}`);
   const file = `${codeToPrettyName(code)}.png`;
   return encodeURI(`/cards/${file}`);
 }
@@ -181,9 +159,7 @@ const textShadow = "0 1px 2px rgba(0,0,0,.9),0 0 2px rgba(0,0,0,.7)";
 
 function CardBase({ code }: { code: string }) {
   const src = imagePathByCode(code);
-  return (
-    <Image src={src} alt={code} fill className="object-cover rounded-lg" unoptimized />
-  );
+  return <Image src={src} alt={code} fill className="object-cover rounded-lg" unoptimized />;
 }
 function CircleOverlay({ cx, cy, dPct, children }: { cx: number; cy: number; dPct: number; children: React.ReactNode }) {
   const size = `${dPct}%`;
@@ -196,19 +172,7 @@ function CircleOverlay({ cx, cy, dPct, children }: { cx: number; cy: number; dPc
     </div>
   );
 }
-function NameOverlay({
-  cx,
-  cy,
-  wPct,
-  hPct,
-  children,
-}: {
-  cx: number;
-  cy: number;
-  wPct: number;
-  hPct: number;
-  children: React.ReactNode;
-}) {
+function NameOverlay({ cx, cy, wPct, hPct, children }: { cx: number; cy: number; wPct: number; hPct: number; children: React.ReactNode }) {
   return (
     <div
       className="absolute flex items-center justify-center text-center truncate"
@@ -389,18 +353,9 @@ function PhaseOverlay({ show, phase }: { show: boolean; phase: number }) {
       </div>
       <style jsx global>{`
         @keyframes fadeout {
-          0% {
-            opacity: 0;
-            transform: translateY(8px) scale(0.98);
-          }
-          15% {
-            opacity: 1;
-            transform: translateY(0) scale(1);
-          }
-          100% {
-            opacity: 0;
-            transform: translateY(-8px) scale(1);
-          }
+          0% { opacity: 0; transform: translateY(8px) scale(0.98); }
+          15% { opacity: 1; transform: translateY(0) scale(1); }
+          100% { opacity: 0; transform: translateY(-8px) scale(1); }
         }
       `}</style>
     </div>
@@ -494,7 +449,6 @@ export default function PlayRoomPage() {
     return () => clearTimeout(t);
   }, [cs]);
 
-  // ปิดทอยเหรียญ แล้วค่อยโชว์ Phase #1
   const onCoinDone = () => {
     setCoinOpen(false);
     ackCoin?.();
@@ -504,18 +458,15 @@ export default function PlayRoomPage() {
     }, 300);
   };
 
-  /* ---------- actor & banner text ---------- */
   const actor: Side | null = (cs?.phaseActor ?? cs?.turn) ?? null;
   const pInfo = cs?.players ?? {};
   const actorName = actor ? (pInfo[actor]?.name || (actor === "p1" ? "Host" : "Player")) : "-";
   const actorAvatar = actor ? (pInfo[actor]?.avatar || null) : null;
 
-  // ในกติกาปัจจุบัน: โจมตีเท่านั้นที่เปลี่ยนเทิร์น
   const alreadyEnded = yourSide ? !!cs?.endTurned?.[yourSide] : false;
   const isYourTurn = !!(actor && yourSide && actor === yourSide);
   const lockActions = !isYourTurn || alreadyEnded;
 
-  // field data
   const yourDiceD: DicePool = ((yourSide && cs?.dice?.[yourSide]) || {}) as DicePool;
   const myUnits: UnitVM[] =
     (yourSide ? cs?.board?.[yourSide] : [])?.slice(0, 3).map((u) => ({ ...u, gauge: u.gauge ?? 0 })) ?? [];
@@ -524,202 +475,199 @@ export default function PlayRoomPage() {
   /* ---------- render ---------- */
   return (
     <main className="min-h-screen p-6 flex flex-col gap-6">
-      {/* Exit button */}
-      <button
-        onClick={() => router.push("/")}
-        className="fixed left-4 top-4 z-50 px-3 py-1 rounded bg-red-600 hover:bg-red-500"
-        title="กลับหน้าแรก"
-      >
-        Exit
-      </button>
+      {/* overlays */}
+      <CoinOverlay show={coinOpen} spinning={coinSpin} winner={coinWinner} you={yourSide} onDone={onCoinDone} />
+      <PhaseOverlay show={phaseShow} phase={cs?.phaseNo ?? 1} />
 
-      {/* เว้นเฉพาะส่วนเนื้อหาให้พ้นปุ่ม */}
-      <div className="pt-12 flex flex-col gap-6">
-        {/* overlays */}
-        <CoinOverlay show={coinOpen} spinning={coinSpin} winner={coinWinner} you={yourSide} onDone={onCoinDone} />
-        <PhaseOverlay show={phaseShow} phase={cs?.phaseNo ?? 1} />
-
-        <header className="flex items-center justify-between">
+      {/* header + Exit inline */}
+      <header className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => router.push("/")}
+            className="px-4 py-2 rounded bg-red-600 hover:bg-red-500"
+            title="กลับหน้าแรก"
+          >
+            Exit
+          </button>
           <h1 className="text-xl font-semibold">Room: {roomId || "-"}</h1>
-          <div className="text-sm opacity-70">You are: {role ?? "-"}</div>
-        </header>
+        </div>
+        <div className="text-sm opacity-70">You are: {role ?? "-"}</div>
+      </header>
 
-        {/* lobby */}
-        {cs?.mode === "lobby" && (
-          <section className="rounded-2xl border border-white/10 p-6 bg-black/20">
-            <button className="px-5 py-2 rounded bg-emerald-600" onClick={() => ready()}>
-              Ready
-            </button>
-            <p className="text-xs opacity-60 mt-2">เริ่มเกม: จั่วมือ 5 ใบ • Dice 10 • เลือกตัวเรา/เป้าหมายก่อนโจมตี</p>
+      {/* lobby */}
+      {cs?.mode === "lobby" && (
+        <section className="rounded-2xl border border-white/10 p-6 bg-black/20">
+          <button className="px-5 py-2 rounded bg-emerald-600" onClick={() => ready()}>
+            Ready
+          </button>
+          <p className="text-xs opacity-60 mt-2">เริ่มเกม: จั่วมือ 5 ใบ • Dice 10 • เลือกตัวเรา/เป้าหมายก่อนโจมตี</p>
 
-            <div className="mt-4 flex gap-3">
-              <div className="flex-1 rounded-lg border border-white/10 p-3">
-                <div className="text-xs opacity-70 mb-1">P1</div>
-                <div className="font-medium">{pInfo.p1?.name || "Host"}</div>
-                <div className="mt-1 text-sm">{cs.ready?.p1 ? "✅ Ready" : "⏳ Waiting"}</div>
-              </div>
-              <div className="flex-1 rounded-lg border border-white/10 p-3">
-                <div className="text-xs opacity-70 mb-1">P2</div>
-                <div className="font-medium">{pInfo.p2?.name || "Player"}</div>
-                <div className="mt-1 text-sm">{cs.ready?.p2 ? "✅ Ready" : "⏳ Waiting"}</div>
-              </div>
+          <div className="mt-4 flex gap-3">
+            <div className="flex-1 rounded-lg border border-white/10 p-3">
+              <div className="text-xs opacity-70 mb-1">P1</div>
+              <div className="font-medium">{pInfo.p1?.name || "Host"}</div>
+              <div className="mt-1 text-sm">{cs.ready?.p1 ? "✅ Ready" : "⏳ Waiting"}</div>
             </div>
-          </section>
-        )}
-
-        {/* play */}
-        {cs?.mode === "play" && (
-          <>
-            {/* ARENA */}
-            <div ref={arenaRef} className="relative">
-              {/* opponent */}
-              <section className="rounded-3xl border border-white/10 p-5 bg-black/20">
-                <div className="flex items-center justify-between">
-                  <div className="font-semibold flex items-center gap-3">
-                    <div>Phase #{cs.phaseNo ?? 1}</div>
-                    <div>•</div>
-                    <div className="flex items-center gap-2">
-                      <span>Turn:</span>
-                      {actorAvatar ? (
-                        <span className="inline-flex items-center gap-2">
-                          <Image src={actorAvatar} alt="avatar" width={20} height={20} className="rounded-full" />
-                          <b>{actorName}</b>
-                        </span>
-                      ) : (
-                        <b>{actorName}</b>
-                      )}
-                    </div>
-                  </div>
-                  <div className="text-sm opacity-70">
-                    {cs.endTurned?.p1 ? "P1 ended" : "P1 active"} | {cs.endTurned?.p2 ? "P2 ended" : "P2 active"}
-                  </div>
-                </div>
-
-                <div className="mt-3 rounded-lg bg-black/30 p-3">
-                  <div className="opacity-70 mb-1 text-sm">Opponent Board</div>
-                  <BoardRow
-                    units={foeUnits}
-                    onPick={(i) => setTarget(i)}
-                    pickIndex={target}
-                    pickType="target"
-                    refsArray={foeRefs}
-                  />
-                </div>
-              </section>
-
-              {/* attack arrow */}
-              {attacker != null && target != null && (
-                <ArrowOverlay
-                  container={arenaRef.current}
-                  from={myRefs.current[attacker] ?? null}
-                  to={foeRefs.current[target] ?? null}
-                />
-              )}
+            <div className="flex-1 rounded-lg border border-white/10 p-3">
+              <div className="text-xs opacity-70 mb-1">P2</div>
+              <div className="font-medium">{pInfo.p2?.name || "Player"}</div>
+              <div className="mt-1 text-sm">{cs.ready?.p2 ? "✅ Ready" : "⏳ Waiting"}</div>
             </div>
+          </div>
+        </section>
+      )}
 
-            {/* controls */}
-            <section className="rounded-2xl border border-white/10 bg-black/10 p-4 flex items-center gap-2">
-              <div className="text-sm">
-                Attacker: <b>{attacker != null ? `#${attacker + 1}` : "-"}</b> | Target: <b>{target != null ? `#${target + 1}` : "-"}</b>
-                {attUnit && <span className="ml-2 opacity-70">({attUnit.element}, ULT {(attUnit.gauge ?? 0)}/3)</span>}
-              </div>
-              <div className="ml-auto flex gap-2">
-                <button
-                  className="px-3 py-1 rounded bg-amber-700 disabled:opacity-40"
-                  disabled={!canBasic || lockActions}
-                  onClick={() => onCommit("basic")}
-                >
-                  Basic (1)
-                </button>
-                <button
-                  className="px-3 py-1 rounded bg-sky-700 disabled:opacity-40"
-                  disabled={!canSkill || lockActions}
-                  onClick={() => onCommit("skill")}
-                >
-                  Skill (3)
-                </button>
-                <button
-                  className="px-3 py-1 rounded bg-violet-700 disabled:opacity-40"
-                  disabled={!canUlt || lockActions}
-                  onClick={() => onCommit("ult")}
-                >
-                  Ultimate (5)
-                </button>
-                {/* End Phase ถูกปิดไว้ตามกติกาใหม่ */}
-                <button className="px-3 py-1 rounded bg-emerald-700 opacity-40 cursor-not-allowed" disabled onClick={() => endPhase()}>
-                  End Phase
-                </button>
-              </div>
-            </section>
-
-            {/* your field */}
+      {/* play */}
+      {cs?.mode === "play" && (
+        <>
+          {/* ARENA */}
+          <div ref={arenaRef} className="relative">
+            {/* opponent */}
             <section className="rounded-3xl border border-white/10 p-5 bg-black/20">
               <div className="flex items-center justify-between">
-                <div className="font-medium">Your Board</div>
-              </div>
-
-              <div className="mt-4 flex justify-center">
-                <BoardRow
-                  units={myUnits}
-                  onPick={(i) => {
-                    setAttacker(i);
-                    setTarget(null);
-                  }}
-                  pickIndex={attacker}
-                  pickType="attacker"
-                  refsArray={myRefs}
-                />
-              </div>
-
-              <div className="mt-6 grid grid-cols-12 gap-4">
-                {/* hand */}
-                <div className="col-span-12 md:col-span-8 rounded-xl border border-white/10 bg-neutral-900/40 p-4">
-                  <div className="font-medium mb-2">Your Hand</div>
-                  <div className="flex flex-wrap gap-3">
-                    {(yourSide && (cs.hand?.[yourSide]?.length ?? 0) > 0) ? (
-                      cs.hand[yourSide]!.map((code, i) => (
-                        <div key={`${code}-${i}`} className="flex flex-col items-center gap-1">
-                          <div className="relative" style={{ width: FRAME_W, height: FRAME_H }}>
-                            <CardBase code={code} />
-                          </div>
-                          <div className="flex gap-1">
-                            <button
-                              className="px-2 py-1 rounded bg-neutral-700 hover:bg-neutral-600 text-xs disabled:opacity-40"
-                              disabled={lockActions}
-                              onClick={() => playCard(i)}
-                            >
-                              Play
-                            </button>
-                            <button
-                              className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-xs disabled:opacity-40"
-                              onClick={() => discardForInfinite(i)}
-                              disabled={lockActions}
-                              title="Discard → ∞"
-                            >
-                              Discard → ∞
-                            </button>
-                          </div>
-                        </div>
-                      ))
+                <div className="font-semibold flex items-center gap-3">
+                  <div>Phase #{cs.phaseNo ?? 1}</div>
+                  <div>•</div>
+                  <div className="flex items-center gap-2">
+                    <span>Turn:</span>
+                    {actorAvatar ? (
+                      <span className="inline-flex items-center gap-2">
+                        <Image src={actorAvatar} alt="avatar" width={20} height={20} className="rounded-full" />
+                        <b>{actorName}</b>
+                      </span>
                     ) : (
-                      <div className="text-sm opacity-70">Empty hand</div>
+                      <b>{actorName}</b>
                     )}
                   </div>
                 </div>
-
-                {/* dice */}
-                <div className="col-span-12 md:col-span-4 rounded-xl border border-white/10 bg-neutral-900/40 p-4">
-                  <div className="font-medium mb-2">Your Dice</div>
-                  <DiceTray dice={yourDiceD} priority={yourEls} />
-                  <div className="mt-2">
-                    <DiceList dice={yourDiceD} priority={yourEls} />
-                  </div>
+                <div className="text-sm opacity-70">
+                  {cs.endTurned?.p1 ? "P1 ended" : "P1 active"} | {cs.endTurned?.p2 ? "P2 ended" : "P2 active"}
                 </div>
               </div>
+
+              <div className="mt-3 rounded-lg bg-black/30 p-3">
+                <div className="opacity-70 mb-1 text-sm">Opponent Board</div>
+                <BoardRow
+                  units={foeUnits}
+                  onPick={(i) => setTarget(i)}
+                  pickIndex={target}
+                  pickType="target"
+                  refsArray={foeRefs}
+                />
+              </div>
             </section>
-          </>
-        )}
-      </div>
+
+            {/* attack arrow */}
+            {attacker != null && target != null && (
+              <ArrowOverlay
+                container={arenaRef.current}
+                from={myRefs.current[attacker] ?? null}
+                to={foeRefs.current[target] ?? null}
+              />
+            )}
+          </div>
+
+          {/* controls */}
+          <section className="rounded-2xl border border-white/10 bg-black/10 p-4 flex items-center gap-2">
+            <div className="text-sm">
+              Attacker: <b>{attacker != null ? `#${attacker + 1}` : "-"}</b> | Target: <b>{target != null ? `#${target + 1}` : "-"}</b>
+              {attUnit && <span className="ml-2 opacity-70">({attUnit.element}, ULT {(attUnit.gauge ?? 0)}/3)</span>}
+            </div>
+            <div className="ml-auto flex gap-2">
+              <button
+                className="px-3 py-1 rounded bg-amber-700 disabled:opacity-40"
+                disabled={!canBasic || lockActions}
+                onClick={() => onCommit("basic")}
+              >
+                Basic (1)
+              </button>
+              <button
+                className="px-3 py-1 rounded bg-sky-700 disabled:opacity-40"
+                disabled={!canSkill || lockActions}
+                onClick={() => onCommit("skill")}
+              >
+                Skill (3)
+              </button>
+              <button
+                className="px-3 py-1 rounded bg-violet-700 disabled:opacity-40"
+                disabled={!canUlt || lockActions}
+                onClick={() => onCommit("ult")}
+              >
+                Ultimate (5)
+              </button>
+              <button className="px-3 py-1 rounded bg-emerald-700 opacity-40 cursor-not-allowed" disabled onClick={() => endPhase()}>
+                End Phase
+              </button>
+            </div>
+          </section>
+
+          {/* your field */}
+          <section className="rounded-3xl border border-white/10 p-5 bg-black/20">
+            <div className="flex items-center justify-between">
+              <div className="font-medium">Your Board</div>
+            </div>
+
+            <div className="mt-4 flex justify-center">
+              <BoardRow
+                units={myUnits}
+                onPick={(i) => {
+                  setAttacker(i);
+                  setTarget(null);
+                }}
+                pickIndex={attacker}
+                pickType="attacker"
+                refsArray={myRefs}
+              />
+            </div>
+
+            <div className="mt-6 grid grid-cols-12 gap-4">
+              {/* hand */}
+              <div className="col-span-12 md:col-span-8 rounded-xl border border-white/10 bg-neutral-900/40 p-4">
+                <div className="font-medium mb-2">Your Hand</div>
+                <div className="flex flex-wrap gap-3">
+                  {(yourSide && (cs.hand?.[yourSide]?.length ?? 0) > 0) ? (
+                    cs.hand[yourSide]!.map((code, i) => (
+                      <div key={`${code}-${i}`} className="flex flex-col items-center gap-1">
+                        <div className="relative" style={{ width: FRAME_W, height: FRAME_H }}>
+                          <CardBase code={code} />
+                        </div>
+                        <div className="flex gap-1">
+                          <button
+                            className="px-2 py-1 rounded bg-neutral-700 hover:bg-neutral-600 text-xs disabled:opacity-40"
+                            disabled={lockActions}
+                            onClick={() => playCard(i)}
+                          >
+                            Play
+                          </button>
+                          <button
+                            className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-xs disabled:opacity-40"
+                            onClick={() => discardForInfinite(i)}
+                            disabled={lockActions}
+                            title="Discard → ∞"
+                          >
+                            Discard → ∞
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-sm opacity-70">Empty hand</div>
+                  )}
+                </div>
+              </div>
+
+              {/* dice */}
+              <div className="col-span-12 md:col-span-4 rounded-xl border border-white/10 bg-neutral-900/40 p-4">
+                <div className="font-medium mb-2">Your Dice</div>
+                <DiceTray dice={yourDiceD} priority={yourEls} />
+                <div className="mt-2">
+                  <DiceList dice={yourDiceD} priority={yourEls} />
+                </div>
+              </div>
+            </div>
+          </section>
+        </>
+      )}
     </main>
   );
 }
