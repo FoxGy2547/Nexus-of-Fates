@@ -176,9 +176,6 @@ export default function Home() {
               Create
             </button>
           </div>
-          <p className="mt-2 text-xs opacity-70">
-            โฮสต์จะถูกกำหนดเป็นฝั่ง p1 โดยอัตโนมัติ
-          </p>
         </div>
 
         <div className="rounded-xl border border-white/10 p-4 bg-black/20">
@@ -208,7 +205,7 @@ export default function Home() {
         <div className="flex flex-wrap items-center gap-3">
           <div className="font-semibold">Deck Builder</div>
           <span className="text-sm opacity-70">
-            ใช้คลังการ์ดของบัญชีที่กำลังล็อกอินอยู่ (ไอดีใครไอดีมัน)
+            เพิ่ม / แก้ไขเด็ค
           </span>
           <div className="ml-auto">
             <button
@@ -226,9 +223,9 @@ export default function Home() {
       {/* wish / gacha entry */}
       <section className="rounded-xl border border-white/10 p-4 bg-black/20">
         <div className="flex flex-wrap items-center gap-3">
-          <div className="font-semibold">Gacha / Wish</div>
+          <div className="font-semibold">Gacha</div>
           <span className="text-sm opacity-70">
-            สุ่มด้วย Nexus Deal ที่แลกจาก Nexus Point — มีแบนเนอร์สวย ๆ ให้กดเล่นเพลิน ๆ
+            มีแบนเนอร์สวย ๆ ให้กดเล่นเพลิน ๆ
           </span>
         </div>
         <div className="mt-3 flex gap-2">
